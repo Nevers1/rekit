@@ -87,7 +87,8 @@ opencode mcp add rekit --global -- rekit mcp
 ```
 
 Tools are named `info`, `strings`, `grep`, `hex`, `entropy`, `imports`,
-`exports`, `antidebug`, `scan`, `archive`; clients prefix them with the server
+`exports`, `antidebug`, `scan`, `archive`, `manifest`, `decompile`, `disasm`,
+`r2`, `patch`, `binwalk` and `doctor`; clients prefix them with the server
 name, so the agent sees `rekit_info`.
 
 The server also ships usage instructions in the `initialize` response, so the
@@ -108,6 +109,13 @@ paragraph in the system prompt.
 | `antidebug` | Is it fighting analysis? Scored verdict, not a wall of matches. |
 | `scan` | Crypto constants (AES S-box, SHA-256 K, ChaCha sigma) and imports grouped into anti/crypto/net/mem/priv. |
 | `archive` | What is inside this APK/JAR/zip/tar.gz, so I can pick a `path::inner`. |
+| `manifest` | The decoded `AndroidManifest.xml` of an APK: package, version, permissions, exported components. No apktool, no unpacking. |
+| `decompile` | jadx to Java, cached. Lists classes, or returns one class source by name. |
+| `disasm` | Disassembly by symbol or address range (llvm-objdump, objdump fallback). |
+| `r2` | One r2 shot: functions, `aflj`, pseudo-C, xrefs, imports, sections. |
+| `patch` | Write bytes at an offset, but only after `expect` matches what is already there. |
+| `binwalk` | Embedded files and firmware signatures, optionally carved out. |
+| `doctor` | Which external tools exist and their versions, so a missing dependency is explained. |
 
 ## CLI
 
@@ -122,6 +130,13 @@ rekit hex libnative.so --offset 0x2a8 --length 64
 rekit antidebug libnative.so
 rekit scan libnative.so --kind apis
 rekit imports libnative.so --limit 20
+rekit manifest app.apk::AndroidManifest.xml
+rekit decompile app.apk --class com.example.MainActivity
+rekit disasm libnative.so --symbol JNI_OnLoad
+rekit r2 libnative.so --kind pdc --target entry0
+rekit patch libnative.so --offset 0x2a8 --bytes "90 90" --expect "f3 0f"
+rekit binwalk firmware.bin --extract
+rekit doctor
 ```
 
 `--json` on `info`, `entropy` and `antidebug` gives machine-readable output.
@@ -143,13 +158,20 @@ Supported containers: zip (APK, JAR, IPA payloads), tar.gz, plain gz.
 
 ## What it does not do yet
 
-Honest scope for `0.1`: this is the static half.
+Honest scope for `0.1`: everything here is static.
 
-- No emulation, no Frida, no decompiler. `rekit` will tell you a binary is
-  VMProtect-packed; it will not unpack it for you.
-- DEX, JVM and .NET get format detection and offsets, not structure. Use `jadx`
-  or `ilspycmd` for the decompiled view.
+- **Formats are parsed in Rust**: ELF, PE, Mach-O, zip, tar.gz, gz, Android
+  binary XML, plus magic-byte detection for DEX, JAR, APK, wasm, PDF, SQLite and
+  Android boot images. Nothing is executed and no external tool is needed.
+- **Disassembly, decompilation and carving are wrappers** around `llvm-objdump`,
+  `r2`, `jadx`, `apktool`, `binwalk`, `frida` and `vol`. `doctor` reports what is
+  missing instead of failing later.
+- DEX, JVM and .NET get format detection and offsets, not structure: use
+  `decompile` (jadx) or `ilspycmd` for the decompiled view. `ilspycmd` is not
+  installed here, so `doctor` marks it missing.
 - `ar`/`deb` payloads are recognised but not unpacked.
+- No emulation, no unpacking of VMProtect/Themida. `rekit` tells you a binary is
+  packed; it does not defeat the packer.
 
 The next step is emulation with a virtualized environment, so an agent can run a
 function behind an anti-debug check and get the real return value.

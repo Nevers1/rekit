@@ -28,7 +28,7 @@ pub fn resolve(spec: &str) -> Result<PathBuf> {
     }
 }
 
-fn cache_root() -> PathBuf {
+pub fn cache_root() -> PathBuf {
     if let Ok(dir) = std::env::var("REKIT_CACHE") {
         return PathBuf::from(dir);
     }

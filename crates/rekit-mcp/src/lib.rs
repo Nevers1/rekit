@@ -20,7 +20,9 @@ file inside an archive, for example `app.apk::lib/arm64-v8a/libnative.so` or \
 `firmware.bin::rootfs.tar.gz::bin/busybox`. Prefer `info` first: it tells the \
 format, architecture and whether the file is packed. `grep` searches raw bytes \
 and accepts `\"text\"` or hex such as `de ad be ef`. Start with a small `limit` \
-and raise it only when needed.";
+and raise it only when needed. For Android, `manifest` decodes binary XML in \
+place and `decompile` runs jadx; `disasm`, `r2`, `binwalk` and `patch` need the \
+external tools that `doctor` lists. `patch` always requires `expect`.";
 
 /// Start serving on stdin/stdout. Returns when the client closes the pipe.
 pub fn serve() -> Result<()> {
@@ -198,6 +200,64 @@ pub fn tools() -> Value {
             "inputSchema": schema(json!({
                 "path": {"type": "string"}
             }), &["path"])
+        },
+        {
+            "name": "disasm",
+            "description": "Disassemble a function or an address range with llvm-objdump (objdump as fallback). Give `symbol`, or `address` plus `length`, or neither to start at the entry point.",
+            "inputSchema": schema(json!({
+                "path": {"type": "string"},
+                "symbol": {"type": "string", "description": "function name exported by the binary"},
+                "address": {"type": "string", "description": "hex start address, e.g. 0x4010 or 4192"},
+                "length": {"type": "integer", "description": "bytes to disassemble when address is given, default 256"}
+            }), &["path"])
+        },
+        {
+            "name": "r2",
+            "description": "Radare2 one-shot analysis: kind=functions (list), json (aflj), pdc (pseudo-C of `target`), xrefs (who calls `target`), imports, sections.",
+            "inputSchema": schema(json!({
+                "path": {"type": "string"},
+                "kind": {"type": "string", "enum": ["functions", "json", "pdc", "xrefs", "imports", "sections"], "description": "default functions"},
+                "target": {"type": "string", "description": "symbol or address for pdc/xrefs, default entry0"}
+            }), &["path"])
+        },
+        {
+            "name": "decompile",
+            "description": "Decompile a dex/apk to Java with jadx (cached). Without `class` it lists the generated files; with `class` it returns that file's source.",
+            "inputSchema": schema(json!({
+                "path": {"type": "string", "description": "apk, dex, jar or a path::inner spec"},
+                "class": {"type": "string", "description": "fully qualified class name, e.g. com.example.Foo"},
+                "limit": {"type": "integer", "description": "files to list, default 100"}
+            }), &["path"])
+        },
+        {
+            "name": "manifest",
+            "description": "Decode AndroidManifest.xml from an APK (binary AXML) into readable XML in place, without apktool. Plain text manifests pass through.",
+            "inputSchema": schema(json!({
+                "path": {"type": "string", "description": "AndroidManifest.xml or app.apk::AndroidManifest.xml"}
+            }), &["path"])
+        },
+        {
+            "name": "binwalk",
+            "description": "Map embedded files and firmware signatures (binwalk). extract=true unwraps them into the rekit cache.",
+            "inputSchema": schema(json!({
+                "path": {"type": "string"},
+                "extract": {"type": "boolean", "description": "default false"}
+            }), &["path"])
+        },
+        {
+            "name": "patch",
+            "description": "Write bytes into a file at an offset. `expect` is mandatory and must equal what is currently there: a mismatch aborts and reports the real bytes. Use hex with `hex` first.",
+            "inputSchema": schema(json!({
+                "path": {"type": "string"},
+                "offset": {"type": "string", "description": "hex or decimal offset"},
+                "bytes": {"type": "string", "description": "hex bytes to write, e.g. '90 90'"},
+                "expect": {"type": "string", "description": "hex bytes that must be present now"}
+            }), &["path", "offset", "bytes", "expect"])
+        },
+        {
+            "name": "doctor",
+            "description": "Which external tools are installed (r2, jadx, apktool, ilspycmd, binwalk, frida, vol) and their versions. Call this when a wrapper tool reports a missing dependency.",
+            "inputSchema": schema(json!({}), &[])
         }
     ])
 }
@@ -244,6 +304,58 @@ pub fn call_tool(name: &str, args: &Value) -> Result<String> {
             render_scan(&path, &kind, limit)
         }
         "archive" => render_archive(&str_arg(args, "path")?),
+        "disasm" => {
+            let path = str_arg(args, "path")?;
+            let symbol = opt_str(args, "symbol");
+            let address = match args.get("address") {
+                None | Some(Value::Null) => None,
+                Some(v) => match v.as_u64().or_else(|| v.as_str().and_then(parse_number)) {
+                    Some(n) => Some(n),
+                    None => bail!("address must be a number or a hex string"),
+                },
+            };
+            let length = (num_arg(args, "length", 256) as usize).clamp(16, 65_536);
+            core::external::disasm(&path, symbol.as_deref(), address, length)
+        }
+        "r2" => {
+            let path = str_arg(args, "path")?;
+            let kind = opt_str(args, "kind").unwrap_or_else(|| "functions".to_string());
+            let target = opt_str(args, "target");
+            core::external::r2(&path, &kind, target.as_deref())
+        }
+        "decompile" => {
+            let path = str_arg(args, "path")?;
+            let class = opt_str(args, "class");
+            let limit = (num_arg(args, "limit", 100) as usize).clamp(1, 5_000);
+            core::external::decompile(&path, class.as_deref(), limit)
+        }
+        "manifest" => core::axml::render(&str_arg(args, "path")?),
+        "binwalk" => {
+            let path = str_arg(args, "path")?;
+            let extract = args
+                .get("extract")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            core::external::binwalk(&path, extract)
+        }
+        "patch" => {
+            let path = str_arg(args, "path")?;
+            let offset = match args.get("offset") {
+                Some(v) => match v.as_u64().or_else(|| v.as_str().and_then(parse_number)) {
+                    Some(n) => n,
+                    None => bail!("offset must be a number or a hex string"),
+                },
+                None => bail!("missing required argument \"offset\""),
+            };
+            let bytes = str_arg(args, "bytes")?;
+            let expect = str_arg(args, "expect")?;
+            let res = core::patch::apply_hex(&path, offset, &bytes, &expect)?;
+            Ok(format!(
+                "patched {} at 0x{:x}: {} -> {} ({} bytes)\n",
+                res.path, res.offset, res.before, res.after, res.size
+            ))
+        }
+        "doctor" => render_doctor(),
         other => bail!("unknown tool {other:?}"),
     }
 }
@@ -443,6 +555,29 @@ fn render_scan(path: &str, kind: &str, limit: usize) -> Result<String> {
     Ok(out)
 }
 
+fn render_doctor() -> Result<String> {
+    let tools = core::external::doctor();
+    let mut out = String::new();
+    let missing: Vec<&str> = tools.iter().filter(|t| !t.found).map(|t| t.name).collect();
+    out.push_str(&format!(
+        "{}/{} tools available\n",
+        tools.len() - missing.len(),
+        tools.len()
+    ));
+    for tool in &tools {
+        let mark = if tool.found { "ok " } else { "---" };
+        let version = tool.version.as_deref().unwrap_or("");
+        out.push_str(&format!(
+            "  {mark} {:<14} {:<44} {}\n",
+            tool.name, tool.purpose, version
+        ));
+    }
+    if !missing.is_empty() {
+        out.push_str(&format!("missing: {}\n", missing.join(", ")));
+    }
+    Ok(out)
+}
+
 fn render_archive(path: &str) -> Result<String> {
     let entries = core::resolve::list_entries(std::path::Path::new(path))?;
     let mut out = format!("{} entries\n", entries.len());
@@ -472,7 +607,7 @@ mod tests {
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted.len(), names.len());
-        assert_eq!(names.len(), 10);
+        assert_eq!(names.len(), 17);
     }
 
     #[test]

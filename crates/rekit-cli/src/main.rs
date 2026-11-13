@@ -85,6 +85,52 @@ enum Command {
     },
     /// List archive members.
     Archive { path: String },
+    /// Disassemble a function or an address range.
+    Disasm {
+        path: String,
+        #[arg(long)]
+        symbol: Option<String>,
+        #[arg(long)]
+        address: Option<String>,
+        #[arg(long, default_value_t = 256)]
+        length: usize,
+    },
+    /// Radare2 one-shot analysis.
+    R2 {
+        path: String,
+        #[arg(long, default_value = "functions")]
+        kind: String,
+        #[arg(long)]
+        target: Option<String>,
+    },
+    /// Decompile a dex/apk to Java with jadx (cached).
+    Decompile {
+        path: String,
+        #[arg(long)]
+        class: Option<String>,
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+    },
+    /// Decode an Android binary manifest.
+    Manifest { path: String },
+    /// Embedded files and firmware signatures.
+    Binwalk {
+        path: String,
+        #[arg(long)]
+        extract: bool,
+    },
+    /// Write bytes at an offset, refusing to proceed on an unexpected value.
+    Patch {
+        path: String,
+        #[arg(long)]
+        offset: String,
+        #[arg(long)]
+        bytes: String,
+        #[arg(long)]
+        expect: String,
+    },
+    /// Which external tools are installed.
+    Doctor,
     /// Run the MCP server on stdin/stdout.
     Mcp,
 }
@@ -146,6 +192,36 @@ fn main() -> Result<()> {
             render("scan", json!({"path": path, "kind": kind, "limit": limit}))?
         }
         Command::Archive { path } => render("archive", json!({"path": path}))?,
+        Command::Disasm {
+            path,
+            symbol,
+            address,
+            length,
+        } => render(
+            "disasm",
+            json!({"path": path, "symbol": symbol, "address": address, "length": length}),
+        )?,
+        Command::R2 { path, kind, target } => {
+            render("r2", json!({"path": path, "kind": kind, "target": target}))?
+        }
+        Command::Decompile { path, class, limit } => render(
+            "decompile",
+            json!({"path": path, "class": class, "limit": limit}),
+        )?,
+        Command::Manifest { path } => render("manifest", json!({"path": path}))?,
+        Command::Binwalk { path, extract } => {
+            render("binwalk", json!({"path": path, "extract": extract}))?
+        }
+        Command::Patch {
+            path,
+            offset,
+            bytes,
+            expect,
+        } => render(
+            "patch",
+            json!({"path": path, "offset": offset, "bytes": bytes, "expect": expect}),
+        )?,
+        Command::Doctor => render("doctor", json!({}))?,
     };
 
     print!("{text}");
