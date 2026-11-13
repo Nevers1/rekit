@@ -1,0 +1,15 @@
+[package]
+name = "rekit-mcp"
+description = "MCP (Model Context Protocol) server over stdio exposing rekit-core tools to coding agents"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rekit-core.workspace = true

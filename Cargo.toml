@@ -1,0 +1,29 @@
+[workspace]
+resolver = "2"
+members = ["crates/rekit-core", "crates/rekit-mcp", "crates/rekit-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT"
+authors = ["nevers1"]
+repository = "https://github.com/Nevers1/rekit"
+
+[workspace.dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+goblin = "0.9"
+sha2 = "0.10"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+flate2 = "1"
+tar = "0.4"
+regex = "1"
+clap = { version = "4", features = ["derive"] }
+rekit-core = { path = "crates/rekit-core" }
+rekit-mcp = { path = "crates/rekit-mcp" }
+
+[profile.release]
+lto = "thin"
+strip = true

@@ -1,0 +1,20 @@
+[package]
+name = "rekit-cli"
+description = "Command line front end for rekit: binary info, strings, entropy, anti-debug signals and the MCP server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "rekit"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+rekit-core.workspace = true
+rekit-mcp.workspace = true
