@@ -812,7 +812,7 @@ pub fn call_tool(name: &str, args: &Value) -> Result<String> {
                 step: args.get("step").and_then(Value::as_i64).unwrap_or(1),
                 target: opt_str(args, "target").unwrap_or_else(|| "1".to_string()),
                 limit: num_arg(args, "limit", 500) as usize,
-                vfs: args.get("vfs").and_then(Value::as_bool).unwrap_or(true),
+                vfs: bool_arg(args, "vfs", true),
                 thumb: args.get("thumb").and_then(Value::as_bool).unwrap_or(false),
                 stubs: str_list(args, "stubs"),
                 json: args.get("json").and_then(Value::as_bool).unwrap_or(false),
@@ -836,7 +836,7 @@ pub fn call_tool(name: &str, args: &Value) -> Result<String> {
                 args: opt_str(args, "args").unwrap_or_default(),
                 max_insns: num_arg(args, "max_insns", 2_000_000),
                 timeout_ms: num_arg(args, "timeout_ms", 10_000),
-                vfs: args.get("vfs").and_then(Value::as_bool).unwrap_or(true),
+                vfs: bool_arg(args, "vfs", true),
                 as_double: args
                     .get("as_double")
                     .and_then(Value::as_bool)
@@ -1030,6 +1030,23 @@ fn num_arg(args: &Value, key: &str, default: u64) -> u64 {
     args.get(key)
         .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(parse_number)))
         .unwrap_or(default)
+}
+
+/// A boolean argument that also accepts the string form. The tool this
+/// replaces took `vfs` as "on"/"off", and a caller that still passes "off"
+/// must not silently get the opposite behaviour — `as_bool` would ignore it
+/// and the default is `true`.
+fn bool_arg(args: &Value, key: &str, default: bool) -> bool {
+    match args.get(key) {
+        Some(Value::Bool(value)) => *value,
+        Some(Value::String(text)) => match text.trim().to_ascii_lowercase().as_str() {
+            "on" | "true" | "yes" | "1" => true,
+            "off" | "false" | "no" | "0" => false,
+            _ => default,
+        },
+        Some(value) => value.as_u64().map(|n| n != 0).unwrap_or(default),
+        None => default,
+    }
 }
 
 /// A list argument: either a JSON array of strings or one comma separated
@@ -1363,6 +1380,19 @@ mod tests {
         assert_eq!(num_arg(&json!({"offset": "0x40"}), "offset", 0), 64);
         assert_eq!(num_arg(&json!({"offset": 40}), "offset", 0), 40);
         assert_eq!(num_arg(&json!({}), "offset", 7), 7);
+    }
+
+    #[test]
+    fn the_old_on_off_spelling_still_works() {
+        // A caller written for the previous tool passes `vfs: "off"`; reading
+        // it with `as_bool` would fall through to the default and leave the
+        // virtual filesystem on, which is the opposite of what was asked.
+        assert!(!bool_arg(&json!({"vfs": "off"}), "vfs", true));
+        assert!(!bool_arg(&json!({"vfs": "false"}), "vfs", true));
+        assert!(!bool_arg(&json!({"vfs": false}), "vfs", true));
+        assert!(bool_arg(&json!({"vfs": "on"}), "vfs", false));
+        assert!(bool_arg(&json!({"vfs": true}), "vfs", false));
+        assert!(bool_arg(&json!({}), "vfs", true));
     }
 
     #[test]
