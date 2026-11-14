@@ -318,13 +318,16 @@ pub fn tools() -> Value {
         },
         {
             "name": "patch",
-            "description": "Write bytes into a file at an offset. `expect` is mandatory and must equal what is currently there: a mismatch aborts and reports the real bytes. Use hex with `hex` first.",
+            "description": "Write bytes into a file at an offset. `expect` is mandatory and must equal what is currently there: a mismatch aborts and reports the real bytes. A copy of the file is kept in the rekit cache first (backup=false skips that), and afterwards rabin2 is asked whether the file still parses. Use hex with `hex` first.",
             "inputSchema": schema(json!({
                 "path": {"type": "string"},
                 "offset": {"type": "string", "description": "hex or decimal offset"},
                 "bytes": {"type": "string", "description": "hex bytes to write, e.g. '90 90'"},
-                "expect": {"type": "string", "description": "hex bytes that must be present now"}
-            }), &["path", "offset", "bytes", "expect"])
+                "string": {"type": "string", "description": "alternative to bytes: text, written with a trailing NUL"},
+                "nop": {"type": "integer", "description": "alternative to bytes: how many 0x90 bytes to write"},
+                "expect": {"type": "string", "description": "hex bytes that must be present now, same length as the patch"},
+                "backup": {"type": "boolean", "description": "copy the file to the cache first (default true)"}
+            }), &["path", "offset", "expect"])
         },
         {
             "name": "emulate",
@@ -400,7 +403,8 @@ pub fn tools() -> Value {
                 "address": {"type": "string", "description": "assembly base address for relative jumps, default 0x1000"},
                 "mode": {"type": "string", "description": "asm (bytes only) | patch (write into the file)"},
                 "offset": {"type": "string", "description": "mode=patch: file offset"},
-                "expect": {"type": "string", "description": "mode=patch: hex bytes that must be there now"}
+                "expect": {"type": "string", "description": "mode=patch: hex bytes that must be there now"},
+                "backup": {"type": "boolean", "description": "mode=patch: copy the file to the cache first (default true)"}
             }), &["code"])
         },
         {
@@ -618,13 +622,31 @@ pub fn call_tool(name: &str, args: &Value) -> Result<String> {
                 },
                 None => bail!("missing required argument \"offset\""),
             };
-            let bytes = str_arg(args, "bytes")?;
-            let expect = str_arg(args, "expect")?;
-            let res = core::patch::apply_hex(&path, offset, &bytes, &expect)?;
-            Ok(format!(
+            let expects = str_arg(args, "expect")?;
+            let expect = core::hexdump::parse_pattern(&expects)?;
+            let bytes = core::patch::payload(
+                opt_str(args, "bytes").as_deref(),
+                opt_str(args, "string").as_deref(),
+                args.get("nop").and_then(Value::as_u64),
+            )?;
+            let backup = args.get("backup").and_then(Value::as_bool).unwrap_or(true);
+            let res = core::patch::apply(&path, offset, &bytes, &expect, backup)?;
+            let mut out = format!(
                 "patched {} at 0x{:x}: {} -> {} ({} bytes)\n",
                 res.path, res.offset, res.before, res.after, res.size
-            ))
+            );
+            if let Some(backup) = &res.backup {
+                out.push_str(&format!("backup: {backup}\n"));
+            }
+            match res.reparses {
+                Some(true) => out.push_str("check: rabin2 still parses the file\n"),
+                Some(false) => out.push_str(
+                    "WARNING: rabin2 no longer parses the file — the header, not just \
+                     the code, was probably hit\n",
+                ),
+                None => {}
+            }
+            Ok(out)
         }
         "hook" => {
             let req = core::hook::Request {
@@ -723,16 +745,20 @@ pub fn call_tool(name: &str, args: &Value) -> Result<String> {
                         .ok_or_else(|| anyhow!("offset must be a number or a hex string"))?,
                 };
                 let expect = opt_str(args, "expect");
+                let backup = args.get("backup").and_then(Value::as_bool).unwrap_or(true);
                 let res = core::asm::assemble_and_patch(
                     &path,
                     &code,
                     arch.as_deref(),
                     bits,
                     address,
-                    offset,
-                    expect.as_deref(),
+                    &core::asm::Spot {
+                        offset,
+                        expect: expect.as_deref(),
+                        backup,
+                    },
                 )?;
-                Ok(format!(
+                let mut out = format!(
                     "assembled {}\nwritten   {} at 0x{:x}: {} -> {} ({} bytes)\n",
                     line_for(&res.assembly),
                     res.patch.path,
@@ -740,7 +766,14 @@ pub fn call_tool(name: &str, args: &Value) -> Result<String> {
                     res.patch.before,
                     res.patch.after,
                     res.patch.size
-                ))
+                );
+                if let Some(backup) = &res.patch.backup {
+                    out.push_str(&format!("backup: {backup}\n"));
+                }
+                if res.patch.reparses == Some(false) {
+                    out.push_str("WARNING: rabin2 no longer parses the file\n");
+                }
+                Ok(out)
             } else {
                 let (arch, bits) = match opt_str(args, "path") {
                     Some(path) => {

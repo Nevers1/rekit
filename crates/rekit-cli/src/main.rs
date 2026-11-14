@@ -193,10 +193,20 @@ enum Command {
         path: String,
         #[arg(long)]
         offset: String,
-        #[arg(long)]
-        bytes: String,
+        /// Hex bytes, e.g. "90 90".
+        #[arg(long, conflicts_with_all = ["string", "nop"])]
+        bytes: Option<String>,
+        /// Text to write instead of --bytes, with a trailing NUL.
+        #[arg(long, conflicts_with_all = ["bytes", "nop"])]
+        string: Option<String>,
+        /// Write this many 0x90 bytes instead of --bytes.
+        #[arg(long, conflicts_with_all = ["bytes", "string"])]
+        nop: Option<u64>,
         #[arg(long)]
         expect: String,
+        /// Skip the copy in the cache that is made before writing.
+        #[arg(long)]
+        no_backup: bool,
     },
     /// Assemble instructions into bytes, and optionally write them into the file.
     Asm {
@@ -219,6 +229,9 @@ enum Command {
         offset: Option<String>,
         #[arg(long)]
         expect: Option<String>,
+        /// Skip the copy in the cache that is made before writing.
+        #[arg(long)]
+        no_backup: bool,
     },
     /// What changed between two builds of the same binary.
     Diff {
@@ -593,10 +606,21 @@ fn main() -> Result<()> {
             path,
             offset,
             bytes,
+            string,
+            nop,
             expect,
+            no_backup,
         } => render(
             "patch",
-            json!({"path": path, "offset": offset, "bytes": bytes, "expect": expect}),
+            json!({
+                "path": path,
+                "offset": offset,
+                "bytes": bytes,
+                "string": string,
+                "nop": nop,
+                "expect": expect,
+                "backup": !no_backup,
+            }),
         )?,
         Command::Asm {
             code,
@@ -607,6 +631,7 @@ fn main() -> Result<()> {
             patch,
             offset,
             expect,
+            no_backup,
         } => render(
             "asm",
             json!({
@@ -618,6 +643,7 @@ fn main() -> Result<()> {
                 "mode": if patch { "patch" } else { "asm" },
                 "offset": offset,
                 "expect": expect,
+                "backup": !no_backup,
             }),
         )?,
         Command::Diff {

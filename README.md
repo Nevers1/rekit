@@ -135,7 +135,7 @@ paragraph in the system prompt.
 | `r2` | One r2 shot: functions, `aflj`, pseudo-C, xrefs, imports, sections. |
 | `asm` | Assemble instructions to bytes, or write them in after `expect` matches. |
 | `diff` | What changed between two versions: functions added, removed, modified. |
-| `patch` | Write bytes at an offset, but only after `expect` matches what is already there. |
+| `patch` | Write bytes at an offset, but only after `expect` matches what is already there. Keeps a copy of the file in the cache first, then asks rabin2 whether it still parses. |
 | `binwalk` | Embedded files and firmware signatures, optionally carved out. |
 | `emulate_list` | Which functions can be called, with addresses and architecture. |
 | `emulate` | Run one function in a sandboxed CPU and get the real return value — through the anti-debug checks, with a JNIEnv when it is a native method, or in a real QEMU process when Unicorn cannot execute the code. |
@@ -166,6 +166,8 @@ rekit decompile app.apk --class com.example.MainActivity
 rekit disasm libnative.so --symbol JNI_OnLoad
 rekit r2 libnative.so --kind pdc --target entry0
 rekit patch libnative.so --offset 0x2a8 --bytes "90 90" --expect "f3 0f"
+rekit patch libnative.so --offset 0x2a8 --string "AAAA-BBBB" --expect "00 00 00 00 00 00 00 00 00 00"
+rekit patch libnative.so --offset 0x2a8 --nop 4 --expect "f3 0f 1e fa"
 rekit binwalk firmware.bin --extract
 rekit emulate libnative.so --symbol check_license --args 'str:"AAAA-BBBB"'
 rekit emulate-list libnative.so --filter check
@@ -202,6 +204,12 @@ entry is used for the cache path, so a hostile entry called `../../etc/passwd`
 cannot escape the cache directory.
 
 Supported containers: zip (APK, JAR, IPA payloads), tar.gz, plain gz.
+
+`patch` and `asm --patch` also write into the cache: a copy of the file lands in
+`backups/` before the first byte changes, keyed by path, size and mtime so two
+patches of the same version do not pile up. `--no-backup` skips it. After the
+write the file is handed back to rabin2 — if it parsed before and refuses now,
+the header took the hit and the answer says so.
 
 ## Four decompilers, one contract
 

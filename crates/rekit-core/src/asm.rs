@@ -118,7 +118,17 @@ pub fn assemble(code: &str, arch: &str, bits: u32, address: u64) -> Result<Assem
     })
 }
 
-/// Assemble, then write the result at `offset`.
+/// Where to write, and how carefully.
+pub struct Spot<'a> {
+    pub offset: u64,
+    /// What must already be there. `None` makes the tool report the real bytes
+    /// instead of writing, so the retry is a copy-paste.
+    pub expect: Option<&'a str>,
+    /// Keep a copy of the file in the cache before writing.
+    pub backup: bool,
+}
+
+/// Assemble, then write the result into the file.
 ///
 /// The `expect` contract is the same one `patch` enforces: without it nothing
 /// is written, and the caller is shown what is actually there so the retry is
@@ -129,8 +139,7 @@ pub fn assemble_and_patch(
     arch: Option<&str>,
     bits: Option<u32>,
     address: u64,
-    offset: u64,
-    expect: Option<&str>,
+    spot: &Spot<'_>,
 ) -> Result<AsmPatch> {
     let (arch, bits) = match (arch, bits) {
         (Some(arch), Some(bits)) => (arch.to_string(), bits),
@@ -148,17 +157,18 @@ pub fn assemble_and_patch(
         .map(|i| u8::from_str_radix(&assembly.hex[i..i + 2], 16))
         .collect::<Result<Vec<u8>, _>>()?;
 
-    let expect = match expect {
+    let expect = match spot.expect {
         Some(expect) => parse_pattern(expect)?,
         None => {
             let path = resolve(spec)?;
             let data = std::fs::read(&path)?;
-            let start = offset as usize;
+            let start = spot.offset as usize;
             let end = start.saturating_add(bytes.len()).min(data.len());
             if start < data.len() {
                 bail!(
-                    "no expect given: at {offset:#x} the file currently holds {}, \
+                    "no expect given: at {:#x} the file currently holds {}, \
                      pass expect with that value to confirm the spot",
+                    spot.offset,
                     data[start..end]
                         .iter()
                         .map(|b| format!("{b:02x}"))
@@ -166,11 +176,11 @@ pub fn assemble_and_patch(
                         .join(" ")
                 );
             }
-            bail!("offset {offset:#x} is past the end of the file");
+            bail!("offset {:#x} is past the end of the file", spot.offset);
         }
     };
 
-    let patch = patch::apply(spec, offset, &bytes, &expect)?;
+    let patch = patch::apply(spec, spot.offset, &bytes, &expect, spot.backup)?;
     Ok(AsmPatch { assembly, patch })
 }
 
