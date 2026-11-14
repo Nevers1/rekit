@@ -195,23 +195,23 @@ pub fn interrupt(uc: &mut Uc<'_>, st: &mut State, arch: Arch, intno: u32) -> boo
                 syscall_args(uc, Arch::X86),
             )
         }
-        Arch::Arm => {
-            (
-                uc.reg_read(unicorn_engine::RegisterARM::R7 as i32)
-                    .unwrap_or(0),
-                syscall_args(uc, Arch::Arm),
-            )
-        }
-        Arch::Arm64 => {
-            (
-                uc.reg_read(unicorn_engine::RegisterARM64::X8 as i32)
-                    .unwrap_or(0),
-                syscall_args(uc, Arch::Arm64),
-            )
-        }
+        Arch::Arm => (
+            uc.reg_read(unicorn_engine::RegisterARM::R7 as i32)
+                .unwrap_or(0),
+            syscall_args(uc, Arch::Arm),
+        ),
+        Arch::Arm64 => (
+            uc.reg_read(unicorn_engine::RegisterARM64::X8 as i32)
+                .unwrap_or(0),
+            syscall_args(uc, Arch::Arm64),
+        ),
     };
     // `int 0x80` from 64-bit code still speaks the 32-bit table.
-    let table_arch = if arch == Arch::X86_64 { Arch::X86 } else { arch };
+    let table_arch = if arch == Arch::X86_64 {
+        Arch::X86
+    } else {
+        arch
+    };
     let ret = dispatch(uc, st, table_arch, nr, args);
     match arch {
         Arch::X86 | Arch::X86_64 => {
@@ -279,7 +279,12 @@ fn dispatch(uc: &mut Uc<'_>, st: &mut State, arch: Arch, nr: u64, args: [u64; 6]
             }
             0
         }
-        Sys::GetPid | Sys::GetPpid | Sys::GetTid | Sys::GetUid | Sys::GetEuid | Sys::GetGid
+        Sys::GetPid
+        | Sys::GetPpid
+        | Sys::GetTid
+        | Sys::GetUid
+        | Sys::GetEuid
+        | Sys::GetGid
         | Sys::GetEgid => 1,
         Sys::Exit | Sys::ExitGroup => {
             st.halt(uc, Stop::Exited((args[0] & 0xff) as i32), "exit syscall");

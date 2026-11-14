@@ -634,7 +634,12 @@ fn render_doctor() -> Result<String> {
         ));
     }
     match core::emulate::available() {
-        Some(path) => out.push_str(&format!("  ok  {:<14} {:<44} {}\n", "rekit-emu", "execute a function in a sandboxed CPU", path.display())),
+        Some(path) => out.push_str(&format!(
+            "  ok  {:<14} {:<44} {}\n",
+            "rekit-emu",
+            "execute a function in a sandboxed CPU",
+            path.display()
+        )),
         None => out.push_str("  --- rekit-emu       execute a function in a sandboxed CPU\n"),
     }
     if !missing.is_empty() {

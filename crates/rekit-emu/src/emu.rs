@@ -325,9 +325,13 @@ impl Machine {
         {
             let st2 = Rc::clone(&st);
             let arch = loaded.arch;
-            uc.add_code_hook(SENTINEL, SENTINEL + STUB_SLOTS * STUB_STRIDE, move |uc, addr, _| {
-                on_stub(uc, &st2, arch, addr);
-            })
+            uc.add_code_hook(
+                SENTINEL,
+                SENTINEL + STUB_SLOTS * STUB_STRIDE,
+                move |uc, addr, _| {
+                    on_stub(uc, &st2, arch, addr);
+                },
+            )
             .map_err(|e| anyhow::anyhow!("cannot hook stubs: {e}"))?;
         }
         {
@@ -638,12 +642,7 @@ fn map_segments(uc: &mut Uc<'_>, loaded: &Loaded) -> Result<()> {
         .segments
         .iter()
         .filter(|s| s.mem_size > 0)
-        .map(|s| {
-            (
-                s.addr & !0xfff,
-                (s.addr + s.mem_size + 0xfff) & !0xfff,
-            )
-        })
+        .map(|s| (s.addr & !0xfff, (s.addr + s.mem_size + 0xfff) & !0xfff))
         .collect();
     ranges.sort();
     let mut merged: Vec<(u64, u64)> = Vec::new();
@@ -844,9 +843,7 @@ fn on_intr(uc: &mut Uc<'_>, st: &Rc<RefCell<State>>, arch: Arch, intno: u32) {
     let mut state = st.borrow_mut();
     let handled = crate::syscalls::interrupt(uc, &mut state, arch, intno);
     if !handled {
-        state
-            .notes
-            .push(format!("unhandled interrupt {intno:#x}"));
+        state.notes.push(format!("unhandled interrupt {intno:#x}"));
     }
     if state.halted.is_some() {
         return;

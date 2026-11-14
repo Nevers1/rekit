@@ -139,7 +139,10 @@ fn parse_args(text: &str) -> Result<Vec<Arg>> {
             out.push(Arg::Str(value));
             continue;
         }
-        let value = if let Some(hex) = token.strip_prefix("0x").or_else(|| token.strip_prefix("0X")) {
+        let value = if let Some(hex) = token
+            .strip_prefix("0x")
+            .or_else(|| token.strip_prefix("0X"))
+        {
             u64::from_str_radix(hex, 16).with_context(|| format!("bad hex argument {token}"))?
         } else if let Ok(v) = token.parse::<u64>() {
             v
@@ -177,7 +180,8 @@ fn read_binary(path: &std::path::Path) -> Result<Vec<u8>> {
 
 fn list(args: ListArgs) -> Result<ExitCode> {
     let bytes = read_binary(&args.path)?;
-    let loaded = loader::load(&bytes).with_context(|| format!("cannot parse {}", args.path.display()))?;
+    let loaded =
+        loader::load(&bytes).with_context(|| format!("cannot parse {}", args.path.display()))?;
     let mut names: Vec<(String, u64)> = loaded
         .symbols
         .iter()
@@ -267,7 +271,10 @@ fn run_one(args: RunArgs) -> Result<ExitCode> {
         }
         println!("stop      {}", report.stop);
         match report.ret.f64 {
-            Some(f) => println!("return    {} ({}) as double {f}", report.ret.hex, report.ret.i64),
+            Some(f) => println!(
+                "return    {} ({}) as double {f}",
+                report.ret.hex, report.ret.i64
+            ),
             None => println!("return    {} ({})", report.ret.hex, report.ret.i64),
         }
         if !report.calls.is_empty() {

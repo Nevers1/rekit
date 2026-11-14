@@ -286,7 +286,10 @@ fn main() -> Result<()> {
             }),
         )?,
         Command::EmulateList { path, filter, json } => {
-            print!("{}", rekit_core::emulate::list(&path, filter.as_deref(), json)?);
+            print!(
+                "{}",
+                rekit_core::emulate::list(&path, filter.as_deref(), json)?
+            );
             return Ok(());
         }
         Command::Doctor => render("doctor", json!({}))?,

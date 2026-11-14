@@ -123,7 +123,6 @@ impl Loaded {
             })
             .map(|(_, addr)| *addr)
     }
-
 }
 
 pub fn load(bytes: &[u8]) -> Result<Loaded> {
@@ -207,21 +206,18 @@ fn load_elf(elf: &goblin::elf::Elf, bytes: &[u8]) -> Result<Loaded> {
     }
 
     let mut relocs = Vec::new();
-    let mut push = |r_offset: u64,
-                    r_type: u32,
-                    sym_name: Option<String>,
-                    addend: i64,
-                    implicit: bool| {
-        let (kind, implicit_addend) = classify_elf_reloc(arch, r_type, implicit);
-        let Some(kind) = kind else { return };
-        relocs.push(Reloc {
-            addr: base + r_offset,
-            kind,
-            sym: sym_name,
-            addend,
-            implicit_addend,
-        });
-    };
+    let mut push =
+        |r_offset: u64, r_type: u32, sym_name: Option<String>, addend: i64, implicit: bool| {
+            let (kind, implicit_addend) = classify_elf_reloc(arch, r_type, implicit);
+            let Some(kind) = kind else { return };
+            relocs.push(Reloc {
+                addr: base + r_offset,
+                kind,
+                sym: sym_name,
+                addend,
+                implicit_addend,
+            });
+        };
 
     for r in &elf.dynrelas {
         let name = elf
@@ -265,9 +261,9 @@ fn classify_elf_reloc(arch: Arch, r_type: u32, implicit: bool) -> (Option<RelocK
     use RelocKind::*;
     let (kind, mi) = match arch {
         Arch::X86_64 => match r_type {
-            1 => (Some(Absolute), false),   // R_X86_64_64
-            6 | 7 => (Some(Slot), false),   // GLOB_DAT / JUMP_SLOT
-            8 => (Some(Relative), false),   // RELATIVE
+            1 => (Some(Absolute), false), // R_X86_64_64
+            6 | 7 => (Some(Slot), false), // GLOB_DAT / JUMP_SLOT
+            8 => (Some(Relative), false), // RELATIVE
             _ => (None, false),
         },
         Arch::X86 => match r_type {
@@ -283,9 +279,9 @@ fn classify_elf_reloc(arch: Arch, r_type: u32, implicit: bool) -> (Option<RelocK
             _ => (None, false),
         },
         Arch::Arm64 => match r_type {
-            257 => (Some(Absolute), false),  // R_AARCH64_ABS64
+            257 => (Some(Absolute), false),     // R_AARCH64_ABS64
             1025 | 1026 => (Some(Slot), false), // GLOB_DAT / JUMP_SLOT
-            1027 => (Some(Relative), false), // RELATIVE
+            1027 => (Some(Relative), false),    // RELATIVE
             _ => (None, false),
         },
     };
@@ -375,7 +371,11 @@ fn parse_pe_imports(
         if orig_thunk == 0 && name_rva == 0 && first_thunk == 0 {
             break;
         }
-        let lookup = if orig_thunk != 0 { orig_thunk } else { first_thunk };
+        let lookup = if orig_thunk != 0 {
+            orig_thunk
+        } else {
+            first_thunk
+        };
         let mut i = 0u64;
         while let Some(entry_off) = pe_rva_to_offset(pe, lookup as usize + (i as usize) * ptr) {
             let Some(raw) = file.get(entry_off..entry_off + ptr) else {

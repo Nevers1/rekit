@@ -115,7 +115,10 @@ pub fn run_request(req: &Request) -> Result<String> {
 fn render(report: &Value) -> String {
     let mut out = String::new();
     let arch = report.get("arch").and_then(Value::as_str).unwrap_or("?");
-    let platform = report.get("platform").and_then(Value::as_str).unwrap_or("?");
+    let platform = report
+        .get("platform")
+        .and_then(Value::as_str)
+        .unwrap_or("?");
     out.push_str(&format!("arch      {arch} / {platform}\n"));
     match report.get("symbol").and_then(Value::as_str) {
         Some(symbol) => out.push_str(&format!(
@@ -183,7 +186,10 @@ fn render(report: &Value) -> String {
     }
     out.push_str(&format!(
         "elapsed   {} ms\n",
-        report.get("elapsed_ms").and_then(Value::as_u64).unwrap_or(0)
+        report
+            .get("elapsed_ms")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
     ));
     out
 }

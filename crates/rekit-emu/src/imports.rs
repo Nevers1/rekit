@@ -20,7 +20,12 @@ fn arg_at(uc: &Uc<'_>, arch: Arch, platform: Platform, index: usize) -> u64 {
     } else {
         let sp = uc.reg_read(sp_reg_id(arch)).unwrap_or(0);
         let base = sp + stack_arg_base(arch, platform);
-        read_ptr(uc, arch, base + (index - regs.len()) as u64 * arch.ptr_size()).unwrap_or(0)
+        read_ptr(
+            uc,
+            arch,
+            base + (index - regs.len()) as u64 * arch.ptr_size(),
+        )
+        .unwrap_or(0)
     }
 }
 
@@ -274,9 +279,7 @@ pub fn call(uc: &mut Uc<'_>, st: &mut State, name: &str) -> u64 {
             }
             0
         }
-        "mmap" | "mmap64" => {
-            st.alloc(uc, (a[1] as usize).max(1))
-        }
+        "mmap" | "mmap64" => st.alloc(uc, (a[1] as usize).max(1)),
         "munmap" | "mprotect" => 0,
         "brk" => {
             let want = a[0];
@@ -298,7 +301,13 @@ pub fn call(uc: &mut Uc<'_>, st: &mut State, name: &str) -> u64 {
         // Output and formatting
         //
         "printf" | "_printf" => {
-            let text = format(uc, st, a[0], VarArgs::new(uc, arch, platform).start_at(1), arch);
+            let text = format(
+                uc,
+                st,
+                a[0],
+                VarArgs::new(uc, arch, platform).start_at(1),
+                arch,
+            );
             let len = text.len();
             st.write_output(&text);
             len as u64
@@ -311,38 +320,74 @@ pub fn call(uc: &mut Uc<'_>, st: &mut State, name: &str) -> u64 {
             len as u64
         }
         "fprintf" => {
-            let text = format(uc, st, a[1], VarArgs::new(uc, arch, platform).start_at(2), arch);
+            let text = format(
+                uc,
+                st,
+                a[1],
+                VarArgs::new(uc, arch, platform).start_at(2),
+                arch,
+            );
             let len = text.len();
             st.write_output(&text);
             len as u64
         }
         "__printf_chk" => {
-            let text = format(uc, st, a[1], VarArgs::new(uc, arch, platform).start_at(2), arch);
+            let text = format(
+                uc,
+                st,
+                a[1],
+                VarArgs::new(uc, arch, platform).start_at(2),
+                arch,
+            );
             let len = text.len();
             st.write_output(&text);
             len as u64
         }
         "__fprintf_chk" => {
-            let text = format(uc, st, a[2], VarArgs::new(uc, arch, platform).start_at(3), arch);
+            let text = format(
+                uc,
+                st,
+                a[2],
+                VarArgs::new(uc, arch, platform).start_at(3),
+                arch,
+            );
             let len = text.len();
             st.write_output(&text);
             len as u64
         }
         "sprintf" | "_sprintf" => {
-            let text = format(uc, st, a[1], VarArgs::new(uc, arch, platform).start_at(2), arch);
+            let text = format(
+                uc,
+                st,
+                a[1],
+                VarArgs::new(uc, arch, platform).start_at(2),
+                arch,
+            );
             write_bytes(uc, a[0], text.as_bytes());
             write_bytes(uc, a[0] + text.len() as u64, &[0]);
             text.len() as u64
         }
         "__sprintf_chk" => {
-            let text = format(uc, st, a[3], VarArgs::new(uc, arch, platform).start_at(4), arch);
+            let text = format(
+                uc,
+                st,
+                a[3],
+                VarArgs::new(uc, arch, platform).start_at(4),
+                arch,
+            );
             write_bytes(uc, a[0], text.as_bytes());
             write_bytes(uc, a[0] + text.len() as u64, &[0]);
             text.len() as u64
         }
         "snprintf" | "_snprintf" | "_snprintf_s" => {
             let size = a[1] as usize;
-            let text = format(uc, st, a[2], VarArgs::new(uc, arch, platform).start_at(3), arch);
+            let text = format(
+                uc,
+                st,
+                a[2],
+                VarArgs::new(uc, arch, platform).start_at(3),
+                arch,
+            );
             let take = text.len().min(size.saturating_sub(1));
             write_bytes(uc, a[0], &text.as_bytes()[..take]);
             write_bytes(uc, a[0] + take as u64, &[0]);
@@ -350,7 +395,13 @@ pub fn call(uc: &mut Uc<'_>, st: &mut State, name: &str) -> u64 {
         }
         "__snprintf_chk" => {
             let size = a[1] as usize;
-            let text = format(uc, st, a[4], VarArgs::new(uc, arch, platform).start_at(5), arch);
+            let text = format(
+                uc,
+                st,
+                a[4],
+                VarArgs::new(uc, arch, platform).start_at(5),
+                arch,
+            );
             let take = text.len().min(size.saturating_sub(1));
             write_bytes(uc, a[0], &text.as_bytes()[..take]);
             write_bytes(uc, a[0] + take as u64, &[0]);
@@ -481,15 +532,32 @@ pub fn call(uc: &mut Uc<'_>, st: &mut State, name: &str) -> u64 {
             addr
         }
         "__errno" => TLS_BASE + 0x100,
-        "__cxa_atexit" | "__cxa_finalize" | "__gmon_start__" | "_ITM_deregisterTMCloneTable"
-        | "_ITM_registerTMCloneTable" | "__libc_start_main" | "__cxa_thread_atexit_impl" => 0,
+        "__cxa_atexit"
+        | "__cxa_finalize"
+        | "__gmon_start__"
+        | "_ITM_deregisterTMCloneTable"
+        | "_ITM_registerTMCloneTable"
+        | "__libc_start_main"
+        | "__cxa_thread_atexit_impl" => 0,
         "__tls_get_addr" => TLS_BASE,
         "pthread_self" | "pthread_getspecific" | "pthread_setspecific" => 0,
-        "pthread_mutex_lock" | "pthread_mutex_unlock" | "pthread_mutex_init"
-        | "pthread_mutex_destroy" | "pthread_cond_wait" | "pthread_cond_signal"
-        | "pthread_cond_init" | "pthread_cond_destroy" | "pthread_join" | "pthread_detach"
-        | "pthread_create" | "pthread_once" | "pthread_key_create" | "pthread_key_delete"
-        | "pthread_attr_init" | "pthread_attr_destroy" | "pthread_attr_setdetachstate"
+        "pthread_mutex_lock"
+        | "pthread_mutex_unlock"
+        | "pthread_mutex_init"
+        | "pthread_mutex_destroy"
+        | "pthread_cond_wait"
+        | "pthread_cond_signal"
+        | "pthread_cond_init"
+        | "pthread_cond_destroy"
+        | "pthread_join"
+        | "pthread_detach"
+        | "pthread_create"
+        | "pthread_once"
+        | "pthread_key_create"
+        | "pthread_key_delete"
+        | "pthread_attr_init"
+        | "pthread_attr_destroy"
+        | "pthread_attr_setdetachstate"
         | "pthread_setname_np" => 0,
         "sched_yield" | "usleep" | "sleep" | "nanosleep" | "futex" | "syscall" => 0,
         "srand" | "srandom" | "srand48" => {
@@ -573,7 +641,13 @@ pub fn call(uc: &mut Uc<'_>, st: &mut State, name: &str) -> u64 {
         }
         "__android_log_print" => {
             let tag = astr(1, 128);
-            let text = format(uc, st, a[2], VarArgs::new(uc, arch, platform).start_at(3), arch);
+            let text = format(
+                uc,
+                st,
+                a[2],
+                VarArgs::new(uc, arch, platform).start_at(3),
+                arch,
+            );
             st.write_output(&format!("[{tag}] {text}\n"));
             text.len() as u64
         }
@@ -592,10 +666,9 @@ pub fn call(uc: &mut Uc<'_>, st: &mut State, name: &str) -> u64 {
             let class = a[1] as u32;
             let buffer = a[2];
             let len = a[3] as usize;
-            if buffer != 0
-                && matches!(class, 7 | 30) && len >= arch.ptr_size() as usize {
-                    write_bytes(uc, buffer, &vec![0u8; arch.ptr_size() as usize]);
-                }
+            if buffer != 0 && matches!(class, 7 | 30) && len >= arch.ptr_size() as usize {
+                write_bytes(uc, buffer, &vec![0u8; arch.ptr_size() as usize]);
+            }
             if a[4] != 0 {
                 write_u32(uc, a[4], arch.ptr_size() as u32);
             }
@@ -605,7 +678,11 @@ pub fn call(uc: &mut Uc<'_>, st: &mut State, name: &str) -> u64 {
         "GetTickCount64" => (st.now_secs() * 1000.0) as u64,
         "QueryPerformanceCounter" => {
             if a[0] != 0 {
-                write_bytes(uc, a[0], &((st.now_secs() * 10_000_000.0) as u64).to_le_bytes());
+                write_bytes(
+                    uc,
+                    a[0],
+                    &((st.now_secs() * 10_000_000.0) as u64).to_le_bytes(),
+                );
             }
             1
         }
@@ -716,7 +793,8 @@ fn parse_number(bytes: &[u8], base: u32) -> (i64, usize) {
         } else {
             base = 10;
         }
-    } else if base == 16 && i + 1 < bytes.len() && bytes[i] == b'0' && (bytes[i + 1] | 0x20) == b'x' {
+    } else if base == 16 && i + 1 < bytes.len() && bytes[i] == b'0' && (bytes[i + 1] | 0x20) == b'x'
+    {
         i += 2;
     }
     if base < 2 {
@@ -763,7 +841,13 @@ fn handle_fd(st: &State, token: u64) -> u64 {
         .unwrap_or(token)
 }
 
-fn format(uc: &Uc<'_>, st: &mut State, fmt_ptr: u64, mut va: VarArgs<'_, '_>, arch: Arch) -> String {
+fn format(
+    uc: &Uc<'_>,
+    st: &mut State,
+    fmt_ptr: u64,
+    mut va: VarArgs<'_, '_>,
+    arch: Arch,
+) -> String {
     let _ = arch;
     let fmt = read_cstr(uc, fmt_ptr, 8192);
     format_bytes(uc, st, &fmt, &mut va)
