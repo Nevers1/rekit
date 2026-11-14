@@ -82,6 +82,28 @@ would export, and needs no `env` argument — the environment is supplied becaus
 of the name. That is the only case where a zero first argument is replaced: a
 function called with a literal zero keeps it.
 
+## IFUNC fixtures
+
+`libifunc.so` (x86-64) and `libifunc-arm64.so` (AArch64) put an IFUNC next to
+an ordinary function, which is how glibc chooses `memcpy` on load: the slot
+holds a resolver, and the resolver's return value is the function.
+
+| Call | Expected |
+| --- | --- |
+| `ifunc_call` | 23 (`impl_b` 22 + 1) |
+| `plain` | 12 (`impl_a` 11 + 1) |
+
+An emulator that mistakes the slot for the function calls the resolver with the
+caller's arguments and returns its result — a plausible address, not 23. The
+relocation shape differs by linker: `IRELATIVE` for a local IFUNC, a
+`GLOB_DAT`/`JUMP_SLOT` to an `IFUNC` symbol for an exported one, and only the
+second is easy to miss because the symbol type is what gives it away.
+
+```console
+$ rekit emulate libifunc.so --symbol ifunc_call
+return    0x17 (23)
+```
+
 ## Fuzzing fixtures
 
 `libfuzz.so` (x86-64, Linux) holds four functions whose behaviour depends on

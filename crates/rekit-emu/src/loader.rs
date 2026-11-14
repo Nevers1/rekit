@@ -74,6 +74,10 @@ pub enum RelocKind {
     Absolute,
     /// value = symbol address; used for GOT / IAT slots
     Slot,
+    /// value = the result of calling the resolver the addend points at.
+    /// glibc's `IFUNC`: the slot holds a function that chooses one at load
+    /// time (`memcpy` picks a variant by CPU features this way).
+    Ifunc,
 }
 
 pub struct Reloc {
@@ -85,6 +89,13 @@ pub struct Reloc {
     pub addend: i64,
     /// True for 32-bit REL relocations, where the addend lives in memory.
     pub implicit_addend: bool,
+    /// The symbol is an IFUNC, so its address is a resolver, not the function.
+    ///
+    /// A linker usually emits `IRELATIVE` for a local IFUNC and a plain
+    /// `GLOB_DAT`/`JUMP_SLOT` to an `IFUNC` symbol for an exported one, and the
+    /// second shape is indistinguishable from an ordinary import unless the
+    /// symbol type is looked at.
+    pub ifunc: bool,
 }
 
 /// One imported function pointer that the loader wants filled in.
@@ -206,32 +217,53 @@ fn load_elf(elf: &goblin::elf::Elf, bytes: &[u8]) -> Result<Loaded> {
     }
 
     let mut relocs = Vec::new();
-    let mut push =
-        |r_offset: u64, r_type: u32, sym_name: Option<String>, addend: i64, implicit: bool| {
-            let (kind, implicit_addend) = classify_elf_reloc(arch, r_type, implicit);
-            let Some(kind) = kind else { return };
-            relocs.push(Reloc {
-                addr: base + r_offset,
-                kind,
-                sym: sym_name,
-                addend,
-                implicit_addend,
-            });
-        };
+    let mut push = |r_offset: u64,
+                    r_type: u32,
+                    sym_name: Option<String>,
+                    addend: i64,
+                    implicit: bool,
+                    ifunc: bool| {
+        let (kind, implicit_addend) = classify_elf_reloc(arch, r_type, implicit);
+        let Some(kind) = kind else { return };
+        relocs.push(Reloc {
+            addr: base + r_offset,
+            kind,
+            sym: sym_name,
+            addend,
+            implicit_addend,
+            ifunc,
+        });
+    };
+
+    // `STT_GNU_IFUNC` is 10 in every ELF psABI that has it.
+    const STT_IFUNC: u8 = 10;
+    let ifunc_at = |sym: usize| -> bool {
+        elf.dynsyms
+            .get(sym)
+            .map(|s| s.st_type() == STT_IFUNC)
+            .unwrap_or(false)
+    };
 
     for r in &elf.dynrelas {
         let name = elf
             .dynsyms
             .get(r.r_sym)
             .and_then(|s| elf.dynstrtab.get_at(s.st_name).map(str::to_string));
-        push(r.r_offset, r.r_type, name, r.r_addend.unwrap_or(0), false);
+        push(
+            r.r_offset,
+            r.r_type,
+            name,
+            r.r_addend.unwrap_or(0),
+            false,
+            ifunc_at(r.r_sym),
+        );
     }
     for r in &elf.dynrels {
         let name = elf
             .dynsyms
             .get(r.r_sym)
             .and_then(|s| elf.dynstrtab.get_at(s.st_name).map(str::to_string));
-        push(r.r_offset, r.r_type, name, 0, true);
+        push(r.r_offset, r.r_type, name, 0, true, ifunc_at(r.r_sym));
     }
     for r in &elf.pltrelocs {
         let name = elf
@@ -241,7 +273,14 @@ fn load_elf(elf: &goblin::elf::Elf, bytes: &[u8]) -> Result<Loaded> {
         // `pltrelocs` can be either REL or RELA; goblin exposes the same
         // fields on both.
         let addend = r.r_addend.unwrap_or(0);
-        push(r.r_offset, r.r_type, name, addend, r.r_addend.is_none());
+        push(
+            r.r_offset,
+            r.r_type,
+            name,
+            addend,
+            r.r_addend.is_none(),
+            ifunc_at(r.r_sym),
+        );
     }
 
     Ok(Loaded {
@@ -264,24 +303,28 @@ fn classify_elf_reloc(arch: Arch, r_type: u32, implicit: bool) -> (Option<RelocK
             1 => (Some(Absolute), false), // R_X86_64_64
             6 | 7 => (Some(Slot), false), // GLOB_DAT / JUMP_SLOT
             8 => (Some(Relative), false), // RELATIVE
+            37 => (Some(Ifunc), false),   // IRELATIVE
             _ => (None, false),
         },
         Arch::X86 => match r_type {
             1 => (Some(Absolute), implicit), // R_386_32
             6 | 7 => (Some(Slot), false),    // GLOB_DAT / JMP_SLOT
             8 => (Some(Relative), implicit), // RELATIVE
+            42 => (Some(Ifunc), implicit),   // R_386_IRELATIVE
             _ => (None, false),
         },
         Arch::Arm => match r_type {
             2 => (Some(Absolute), implicit),  // R_ARM_ABS32
             21 | 22 => (Some(Slot), false),   // GLOB_DAT / JUMP_SLOT
             23 => (Some(Relative), implicit), // RELATIVE
+            160 => (Some(Ifunc), implicit),   // R_ARM_IRELATIVE
             _ => (None, false),
         },
         Arch::Arm64 => match r_type {
             257 => (Some(Absolute), false),     // R_AARCH64_ABS64
             1025 | 1026 => (Some(Slot), false), // GLOB_DAT / JUMP_SLOT
             1027 => (Some(Relative), false),    // RELATIVE
+            1032 => (Some(Ifunc), false),       // R_AARCH64_IRELATIVE
             _ => (None, false),
         },
     };
@@ -507,4 +550,22 @@ fn load_macho(macho: &goblin::mach::MachO, _file: &[u8]) -> Result<Loaded> {
         import_slots,
         format: "macho",
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_ifunc_relocation_is_recognised_on_every_arch() {
+        for (arch, r_type) in [
+            (Arch::X86_64, 37),
+            (Arch::X86, 42),
+            (Arch::Arm, 160),
+            (Arch::Arm64, 1032),
+        ] {
+            let (kind, _) = classify_elf_reloc(arch, r_type, false);
+            assert_eq!(kind, Some(RelocKind::Ifunc), "{}", arch.name());
+        }
+    }
 }

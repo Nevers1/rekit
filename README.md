@@ -351,6 +351,17 @@ guest dereference NULL, which is never what "pretend it succeeded" means.
 `fuzz` takes the same `--stub`, so one sweep can run against a binary whose
 calls were never linked.
 
+### IFUNC: a function chosen at load time
+
+glibc does not export one `memcpy`: the slot holds a resolver, and what the
+resolver returns is the function to call, picked by the CPU features the machine
+has. Treating that slot as a symbol address lands in the resolver with the
+caller's arguments — an answer that looks like a pointer and is wrong. rekit
+calls the resolver first, in the same Unicorn instance, and writes its answer
+into the slot. Both relocation shapes are handled: `IRELATIVE` for a local
+IFUNC, and a `GLOB_DAT`/`JUMP_SLOT` to a symbol whose type is `IFUNC` for an
+exported one, which is what gcc emits for a `__attribute__((ifunc(...)))`.
+
 ### What emulation cannot do
 
 Honest limits, because a wrong number is worse than no number:

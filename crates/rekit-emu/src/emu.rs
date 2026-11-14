@@ -426,6 +426,11 @@ impl Machine {
             let stub = stub_for(&mut uc, &st, &mut stubs, &slot.name)?;
             write_ptr(&mut uc, loaded.arch, slot.addr, stub)?;
         }
+        // An IFUNC slot holds the address of a resolver, and the value it
+        // returns is the function to call. That cannot be run yet: the hooks
+        // that answer imported calls are installed further down. The slots are
+        // zeroed here and filled once the machine is complete.
+        let mut ifuncs: Vec<(u64, u64)> = Vec::new();
         for reloc in &loaded.relocs {
             let value = match reloc.kind {
                 RelocKind::Relative => {
@@ -439,13 +444,31 @@ impl Machine {
                 RelocKind::Absolute | RelocKind::Slot => {
                     let sym = reloc.sym.as_deref().unwrap_or("");
                     if let Some(addr) = loaded.find_symbol(sym) {
-                        addr.wrapping_add(reloc.addend as u64)
+                        if reloc.ifunc {
+                            // The symbol's address is the resolver. The slot
+                            // has to hold what the resolver returns.
+                            ifuncs.push((reloc.addr, addr));
+                            0
+                        } else {
+                            addr.wrapping_add(reloc.addend as u64)
+                        }
                     } else if !sym.is_empty() {
                         let stub = stub_for(&mut uc, &st, &mut stubs, sym)?;
                         stub.wrapping_add(reloc.addend as u64)
                     } else {
                         0
                     }
+                }
+                RelocKind::Ifunc => {
+                    let offset = if reloc.implicit_addend {
+                        read_ptr(&uc, loaded.arch, reloc.addr).unwrap_or(0) as i64
+                    } else {
+                        reloc.addend
+                    };
+                    if offset != 0 {
+                        ifuncs.push((reloc.addr, loaded.base.wrapping_add(offset as u64)));
+                    }
+                    0
                 }
             };
             write_ptr(&mut uc, loaded.arch, reloc.addr, value)?;
@@ -533,7 +556,42 @@ impl Machine {
             .map_err(|e| anyhow::anyhow!("cannot hook memory: {e}"))?;
         }
 
-        Ok(Machine { uc, st, loaded })
+        let mut machine = Machine { uc, st, loaded };
+        for (slot, resolver) in ifuncs {
+            machine.resolve_ifunc(slot, resolver)?;
+        }
+        Ok(machine)
+    }
+
+    /// Call an IFUNC resolver and store the function it chose.
+    ///
+    /// A resolver takes no arguments and returns a pointer; it runs before the
+    /// function the caller asked for, so its effect on the shared state (the
+    /// stop reason above all) is undone afterwards.
+    fn resolve_ifunc(&mut self, slot: u64, resolver: u64) -> Result<()> {
+        let stack_top = if self.loaded.arch.is_64() {
+            0x7fff_0000_0000
+        } else {
+            0x7ff0_0000
+        };
+        self.setup_call(resolver, None, &[], stack_top, false)?;
+        let started = self.uc.emu_start(resolver, 0, 5_000_000, 0);
+        let arch = self.loaded.arch;
+        let value = read_return(&self.uc, arch);
+        let mut state = self.st.borrow_mut();
+        state.stop = Stop::Running;
+        if let Err(err) = started {
+            // A resolver that fails is not fatal: the slot stays zero, and the
+            // call through it will report an unmapped fetch, which is a better
+            // clue than "the loader gave up".
+            state
+                .notes
+                .push(format!("ifunc resolver at 0x{resolver:x}: {err}"));
+            return Ok(());
+        }
+        drop(state);
+        write_ptr(&mut self.uc, arch, slot, value)?;
+        Ok(())
     }
 
     pub fn run(
