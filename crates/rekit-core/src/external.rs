@@ -18,6 +18,10 @@ use crate::util::sha256_hex;
 
 /// How much command output is worth returning to a model.
 const OUTPUT_CAP: usize = 60_000;
+/// How much is worth parsing. A sweep of 500 runs is a few hundred kilobytes
+/// of JSON, and cutting it at the display limit leaves a document that no
+/// parser accepts — the failure then looks like a broken emulator.
+const PARSE_CAP: usize = 32 << 20;
 
 pub fn which(tool: &str) -> Option<PathBuf> {
     if tool.contains('/') {
@@ -57,6 +61,18 @@ pub fn capture(
     timeout: Duration,
     env: &[(&str, String)],
     cwd: Option<&Path>,
+) -> Result<Output> {
+    capture_with(tool, args, timeout, env, cwd, OUTPUT_CAP)
+}
+
+/// The same, with room for output that is meant to be parsed rather than read.
+fn capture_with(
+    tool: &str,
+    args: &[String],
+    timeout: Duration,
+    env: &[(&str, String)],
+    cwd: Option<&Path>,
+    cap_bytes: usize,
 ) -> Result<Output> {
     let exe = which(tool).ok_or_else(|| anyhow!("{tool} is not installed"))?;
 
@@ -111,11 +127,23 @@ pub fn capture(
     let stderr = err_handle.join().unwrap_or_default();
 
     Ok(Output {
-        stdout: cap(String::from_utf8_lossy(&stdout).to_string()),
-        stderr: cap(String::from_utf8_lossy(&stderr).to_string()),
+        stdout: cap(String::from_utf8_lossy(&stdout).to_string(), cap_bytes),
+        stderr: cap(String::from_utf8_lossy(&stderr).to_string(), cap_bytes),
         success: status.map(|s| s.success()).unwrap_or(false),
         timed_out,
     })
+}
+
+/// Run a command whose stdout is machine-readable, keeping the whole answer.
+pub fn run_parsed(tool: &str, args: &[String], timeout: Duration) -> Result<String> {
+    let out = capture_with(tool, args, timeout, &[], None, PARSE_CAP)?;
+    if out.timed_out {
+        bail!("{tool} timed out after {}s", timeout.as_secs());
+    }
+    if !out.success && out.stdout.trim().is_empty() {
+        bail!("{tool} failed: {}", out.stderr.trim());
+    }
+    Ok(out.stdout)
 }
 
 /// Run a command and return its stdout, turning a failure into an error.
@@ -130,18 +158,18 @@ pub fn run(tool: &str, args: &[String], timeout: Duration) -> Result<String> {
     Ok(out.stdout)
 }
 
-fn cap(text: String) -> String {
-    if text.len() <= OUTPUT_CAP {
+fn cap(text: String, limit: usize) -> String {
+    if text.len() <= limit {
         return text;
     }
-    let mut end = OUTPUT_CAP;
+    let mut end = limit;
     while !text.is_char_boundary(end) {
         end -= 1;
     }
     format!(
         "{}\n... output truncated at {} bytes ({} total)",
         &text[..end],
-        OUTPUT_CAP,
+        limit,
         text.len()
     )
 }
@@ -172,6 +200,14 @@ pub fn doctor() -> Vec<Tool> {
         ("binwalk", "embedded files and firmware carving"),
         ("rasm2", "assembler behind the asm tool"),
         ("frida", "dynamic instrumentation scripts"),
+        (
+            "qemu-aarch64-static",
+            "engine=qemu: AArch64 as a real process",
+        ),
+        (
+            "aarch64-linux-gnu-gcc",
+            "engine=qemu: builds the dlopen harness",
+        ),
         ("vol", "memory dumps"),
         ("curl", "the http tool: TLS, proxies, redirects"),
     ];
@@ -327,7 +363,7 @@ pub fn decompile(spec: &str, class: Option<&str>, limit: usize) -> Result<String
             .or_else(|| files.iter().find(|f| f.to_string_lossy().contains(class)))
             .ok_or_else(|| anyhow!("class {class:?} not found in the decompiled output"))?;
         let text = std::fs::read_to_string(hit)?;
-        return Ok(cap(text));
+        return Ok(cap(text, OUTPUT_CAP));
     }
 
     let mut out = format!("{} java files\n", files.len());

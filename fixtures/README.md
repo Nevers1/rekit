@@ -16,9 +16,22 @@ skipped). The outputs are ignored by git.
 | `t_abs -5` | 5 |
 | `t_strlen "Hello, RE!"` | 10 |
 | `t_strcmp "abc" "abd"` | -1 |
+| `t_hypot 3 4` | 5.0 with `--as-double` (imports `hypot` from libm) |
 | `ad_probe` | **0** |
 
 `libbasic-arm64.so` (AArch64, Linux): same values, same zero from `ad_probe`.
+`t_hypot` is there for the engine choice: Unicorn has no `hypot` behind the
+import and answers 0 while saying so, and QEMU runs the real one:
+
+```console
+$ rekit emulate libbasic-arm64.so --symbol t_hypot --args 3,4 --as-double
+return    0x0 (0)
+calls     hypot x1
+not implemented  hypot
+
+$ rekit emulate libbasic-arm64.so --symbol t_hypot --args 3,4 --as-double --engine qemu
+return    5 (as double)
+```
 
 `win32.dll` / `win64.dll` (PE32 / PE32+):
 
@@ -41,6 +54,33 @@ files     /proc/self/status
 
 If that prints anything other than 0, a check got through: `--no-vfs` turns off
 the fake filesystem, and the `files` line shows what was read.
+
+## JNI fixtures
+
+`libjni.so` (x86-64) and `libjni-arm64.so` (AArch64) are the same source built
+twice: a native method that drives a `JNIEnv` the way a real one does, without
+`jni.h` so the fixture builds anywhere.
+
+`jni_probe` returns a bitmask of what went wrong, so **0** means every call
+behaved. It asks for the version, finds a class, gets a method id, round-trips
+a string through `NewStringUTF`/`GetStringUTFChars`, checks the length, asks
+whether an exception is pending, registers natives, reads the `JavaVM` and
+compares two references.
+
+```console
+$ rekit emulate libjni.so --symbol jni_probe --args env
+return    0x0 (0)
+calls     GetVersion x1, FindClass x1, GetMethodID x1, NewStringUTF x1, GetStringUTFChars x1, ...
+note      JNIEnv at 0x31100000: JNI calls are answered (strings round-trip, no exception is pending)
+
+$ rekit emulate libjni.so --symbol jni_probe --args 0
+return    0x100 (256)     # no environment: the first check fails, as it should
+```
+
+`Java_com_example_Foo_probe` is the same function under the name a real library
+would export, and needs no `env` argument — the environment is supplied because
+of the name. That is the only case where a zero first argument is replaced: a
+function called with a literal zero keeps it.
 
 ## Fuzzing fixtures
 

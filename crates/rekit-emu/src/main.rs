@@ -6,6 +6,7 @@
 
 mod emu;
 mod imports;
+mod jni;
 mod loader;
 mod syscalls;
 mod vfs;
@@ -191,6 +192,10 @@ fn split_args(text: &str) -> Vec<String> {
 fn parse_args(text: &str) -> Result<Vec<Arg>> {
     let mut out = Vec::new();
     for token in split_args(text) {
+        if token == "env" {
+            out.push(Arg::Env);
+            continue;
+        }
         if let Some(rest) = token.strip_prefix("str:") {
             let value = rest.trim().trim_matches('"').to_string();
             out.push(Arg::Str(value));
@@ -507,6 +512,13 @@ mod tests {
             Arg::Str(s) => assert_eq!(s, "a,b"),
             _ => panic!("expected a string argument"),
         }
+    }
+
+    #[test]
+    fn an_env_argument_is_recognised() {
+        let args = parse_args("env,1").unwrap();
+        assert!(matches!(args[0], Arg::Env));
+        assert!(matches!(args[1], Arg::Num(1)));
     }
 
     #[test]

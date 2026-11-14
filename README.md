@@ -138,7 +138,7 @@ paragraph in the system prompt.
 | `patch` | Write bytes at an offset, but only after `expect` matches what is already there. |
 | `binwalk` | Embedded files and firmware signatures, optionally carved out. |
 | `emulate_list` | Which functions can be called, with addresses and architecture. |
-| `emulate` | Run one function in a sandboxed CPU and get the real return value — through the anti-debug checks. |
+| `emulate` | Run one function in a sandboxed CPU and get the real return value — through the anti-debug checks, with a JNIEnv when it is a native method, or in a real QEMU process when Unicorn cannot execute the code. |
 | `fuzz` | The same call over a range of inputs: where the return changes, which input is the key, which one crashes. |
 | `hook` | A Frida script that logs a function's real arguments and return value; optionally runs the process. |
 | `memdump` | What a RAM image holds, through volatility3: processes, sockets, command lines, files, hives, shell history. |
@@ -298,7 +298,86 @@ Honest limits, because a wrong number is worse than no number:
 - **Checksums of the file itself** see the file as it is on disk. Patch first,
   then emulate, or the sum will not match.
 - **Floating point on 32-bit ARM** (VFP/NEON) is not executable by Unicorn 2.1;
-  use `r2` or `disasm` there.
+  use `--engine qemu` with `qemu-arm-static` and an ARM cross compiler, or
+  `r2` / `disasm` there.
+
+### When Unicorn is the wrong engine
+
+Unicorn runs instructions; QEMU runs a program. For code that needs a real
+loader — AArch64 floating point, thread-local storage, constructors, a call into
+libc that Unicorn has no stub for — `--engine qemu` starts the function in a
+real process under `qemu-aarch64-static`, through a small harness that
+`dlopen`s the file and `dlsym`s the symbol.
+
+```console
+$ rekit emulate libbasic-arm64.so --symbol t_hypot --args 3,4 --as-double
+arch      arm64 / linux
+return    0x0 (0)
+calls     hypot x1
+not implemented  hypot
+
+$ rekit emulate libbasic-arm64.so --symbol t_hypot --args 3,4 --as-double --engine qemu
+arch      aarch64 / linux
+engine    qemu (real process)
+target    t_hypot
+stop      returned
+return    5 (as double)
+qemu      /usr/bin/qemu-aarch64-static
+env       -L /usr/aarch64-linux-gnu ~/.cache/rekit/qemu/harness64-da30b53d libbasic-arm64.so t_hypot 3 4
+```
+
+The harness is built once with `aarch64-linux-gnu-gcc` and cached in
+`~/.cache/rekit/qemu` under a name that carries the hash of its source, so an
+edited harness cannot leave a stale binary behind. `--sysroot` points at the
+target's libc when it is not `/usr/aarch64-linux-gnu`, and `--harness` supplies
+a prebuilt one. Two consequences are worth knowing before choosing it:
+
+- **A symbol is required.** The harness looks the function up by name, because
+  an address inside an unloaded shared object means nothing to `dlopen`. An
+  `--address` alone is refused with that explanation rather than guessed at.
+- **Only numbers cross.** A string argument would need an address in the guest,
+  and inventing one gives a confident wrong answer, so string arguments are
+  listed as ignored. Pass the pointer yourself if you need one.
+
+### Native methods: a JNIEnv without a JVM
+
+An Android library's exports are mostly `Java_...` functions whose first
+argument is a `JNIEnv*`, and that argument is the whole reason they cannot be
+run outside an app: `env->functions->FindClass(...)` is a load from a table
+that does not exist. `emulate` supplies one, because JNI is a table of function
+pointers and a table of pointers is exactly what a fake VM can hand out.
+
+```console
+$ rekit emulate libjni.so --symbol jni_probe --args env
+arch      x86_64 / linux
+target    jni_probe at 0x40001129
+stop      returned
+return    0x0 (0)
+calls     GetVersion x1, FindClass x1, GetMethodID x1, NewStringUTF x1, GetStringUTFChars x1, strcmp x1, ... IsSameObject x1
+note      JNIEnv at 0x31100000: JNI calls are answered (strings round-trip, no exception is pending)
+```
+
+The `env` argument is the fake environment. It is also supplied automatically
+for a symbol that starts with `Java_`, since a native method always takes one —
+but **only** then, or when the caller writes `env`: substituting a pointer for
+every zero first argument would turn `t_abs(0)` into a large number.
+
+What is answered with a real answer rather than a convenient zero:
+
+| JNI call | Answer |
+| --- | --- |
+| `NewStringUTF` then `GetStringUTFChars` | the same text that was passed in, so a string comparison means something |
+| `GetStringUTFLength`, `GetStringLength` | the length of that text |
+| `ExceptionOccurred`, `ExceptionCheck` | NULL / 0 — nothing was thrown inside the emulator |
+| `GetVersion` | 1.6 |
+| `RegisterNatives` | `JNI_OK` |
+| `FindClass`, `GetMethodID`, `NewObject` | stable pseudo-references, so identity comparisons behave |
+| `Call*Method`, `Get*Field` | 0 — the Java side is not there |
+
+The last row is the honest limit: an `int` return of 0 is plausible, an object
+return of 0 is NULL, and code that dereferences it faults. That is a visible
+failure rather than a plausible wrong answer, which is the trade this tool makes
+everywhere else too.
 
 
 ### One function, many inputs
@@ -564,6 +643,8 @@ Honest scope for `0.1`.
   around `llvm-objdump`, `r2`, `jadx`, `apktool`, `binwalk`, Ghidra, IDA,
   `ilspycmd`, `javap`, `frida`, `curl` and volatility3. `doctor` reports what is
   missing instead of failing later.
+- `--engine qemu` is a wrapper too, around qemu-user-static and a
+  cross-compiled harness; it runs one function, not the program.
 - `endpoints`, `secrets` and `jwt` are pure Rust: no external tool, no network.
   Only `http` leaves the machine, and only to the URL it was given.
 - DEX, JVM and .NET get format detection and offsets, not structure: use
@@ -574,8 +655,9 @@ Honest scope for `0.1`.
 - Emulation is function level, not program level: `emulate` and `fuzz` call the
   function you name. `hook` runs the whole program, but only through Frida, and
   only on the host it runs on.
-- JNI is not emulated: a function that expects a real `JNIEnv` gets none, so
-  native code calling back into Java faults instead of answering.
+- JNI is answered, not executed: the environment is a table of pointers, so
+  string round-trips and exception checks are real, but `Call*Method` returns 0
+  because there is no Java object behind the reference.
 - The web tools read text, not behaviour: `endpoints` reports a route found in
   a bundle, not whether it exists, and `secrets` reports a key by its shape — a
   high-entropy string that is really a hash, or a live key that matches no

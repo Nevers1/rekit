@@ -20,7 +20,7 @@ use crate::decompilers::parse_address;
 use crate::emulate::{
     find_binary, prepare_path, require_available, run_request, Request as Emulate,
 };
-use crate::external::run as spawn;
+use crate::external::run_parsed as spawn;
 
 /// A sweep trades precision for coverage: a function that never returns would
 /// otherwise burn the full instruction budget on every input.
@@ -203,6 +203,9 @@ fn probe(path: &str, req: &Request) -> Result<String> {
         vfs: req.vfs,
         as_double: false,
         thumb: req.thumb,
+        engine: String::new(),
+        sysroot: None,
+        harness: None,
         json: true,
     };
     let raw = run_request(&inner)?;

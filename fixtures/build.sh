@@ -8,14 +8,17 @@
 set -e
 cd "$(dirname "$0")"
 
-gcc -shared -fPIC -O0 -o libbasic.so basic.c
+gcc -shared -fPIC -O0 -o libbasic.so basic.c -lm
 gcc -shared -fPIC -O0 -o libfuzz.so fuzz.c
+gcc -shared -fPIC -O0 -o libjni.so jni.c
 gcc -shared -fPIC -O0 -o libhooklib.so hooklib.c
 gcc -O0 -o hookhost host.c -L. -lhooklib -Wl,-rpath,'$ORIGIN'
 
 if command -v aarch64-linux-gnu-gcc >/dev/null 2>&1; then
     aarch64-linux-gnu-gcc -shared -fPIC -O0 -fno-stack-protector \
-        -o libbasic-arm64.so basic.c
+        -o libbasic-arm64.so basic.c -lm
+    aarch64-linux-gnu-gcc -shared -fPIC -O0 -fno-stack-protector \
+        -o libjni-arm64.so jni.c
 else
     echo "skipping arm64: aarch64-linux-gnu-gcc not installed" >&2
 fi

@@ -4,3 +4,4 @@
 *.exe
 *.so
 /fixtures/hookhost
+*.core

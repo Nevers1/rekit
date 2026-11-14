@@ -255,6 +255,15 @@ enum Command {
         /// Target is Thumb code (ARM only).
         #[arg(long)]
         thumb: bool,
+        /// unicorn (default) or qemu.
+        #[arg(long, default_value = "unicorn")]
+        engine: String,
+        /// qemu: target sysroot, e.g. /usr/aarch64-linux-gnu.
+        #[arg(long)]
+        sysroot: Option<String>,
+        /// qemu: a prebuilt harness instead of the cached one.
+        #[arg(long)]
+        harness: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -631,6 +640,9 @@ fn main() -> Result<()> {
             no_vfs,
             as_double,
             thumb,
+            engine,
+            sysroot,
+            harness,
             json,
         } => render(
             "emulate",
@@ -645,6 +657,9 @@ fn main() -> Result<()> {
                 "vfs": !no_vfs,
                 "as_double": as_double,
                 "thumb": thumb,
+                "engine": engine,
+                "sysroot": sysroot,
+                "harness": harness,
                 "json": json,
             }),
         )?,

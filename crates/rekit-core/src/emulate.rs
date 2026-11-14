@@ -49,11 +49,38 @@ pub struct Request {
     pub vfs: bool,
     pub as_double: bool,
     pub thumb: bool,
+    /// `unicorn` (default) or `qemu`.
+    pub engine: String,
+    /// qemu: target sysroot for the dynamic loader.
+    pub sysroot: Option<String>,
+    /// qemu: a prebuilt harness instead of the cached one.
+    pub harness: Option<String>,
     /// Return the raw JSON report instead of the rendered summary.
     pub json: bool,
 }
 
 pub fn run_request(req: &Request) -> Result<String> {
+    let engine = req.engine.trim().to_ascii_lowercase();
+    if engine == "qemu" {
+        // QEMU runs a real process, so it needs a real file rather than a
+        // member name, and it formats its own answer.
+        let path = crate::resolve::resolve(&req.path)?;
+        return crate::qemu::run(&crate::qemu::Request {
+            path: path.display().to_string(),
+            symbol: req.symbol.clone(),
+            args: req.args.clone(),
+            as_double: req.as_double,
+            sysroot: req.sysroot.clone(),
+            harness: req.harness.clone(),
+            json: req.json,
+        });
+    }
+    if !engine.is_empty() && engine != "unicorn" {
+        bail!(
+            "engine {engine:?} is not one of unicorn, qemu: unicorn executes the function \
+             in a sandbox, qemu runs a real process for the code unicorn cannot execute"
+        );
+    }
     let exe = find_binary().ok_or_else(|| {
         anyhow!(
             "rekit-emu is not installed; build it with `cargo build --release -p rekit-emu` \

@@ -23,6 +23,7 @@ pub mod info;
 pub mod javap;
 pub mod memdump;
 pub mod patch;
+pub mod qemu;
 pub mod resolve;
 pub mod resources;
 pub mod scan;

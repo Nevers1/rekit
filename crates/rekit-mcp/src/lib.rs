@@ -31,7 +31,9 @@ place and `decompile` runs jadx; `disasm`, `r2`, `binwalk` and `patch` need the 
 external tools that `doctor` lists. `patch` always requires `expect`. For web \
 material, `endpoints`, `secrets`, `jwt` and `http` take the same `::` spec, so a \
 bundle inside an APK needs no unpacking; `secrets` masks values unless `reveal` \
-is set.";
+is set. `emulate` runs one function: arguments are numbers or `str:\"text\"`, `env` \
+passes the fake JNIEnv, and `engine=qemu` runs a real ARM process when Unicorn \
+cannot execute the code (AArch64 floating point, TLS, constructors).";
 
 /// Start serving on stdin/stdout. Returns when the client closes the pipe.
 pub fn serve() -> Result<()> {
@@ -326,7 +328,7 @@ pub fn tools() -> Value {
         },
         {
             "name": "emulate",
-            "description": "Actually execute one function from a PE/ELF/Mach-O in a sandboxed CPU and report what it returns. This is the only tool that gives facts instead of guesses about obfuscated licence, password, integrity and anti-debug checks: ptrace returns 0, TracerPid is 0, no debugger is present, time advances, random bytes look real. Call `emulate_list` first when you do not know the function name. Arguments go in a string: numbers may be hex, strings are written str:\"text\" with quotes when they contain commas.",
+            "description": "Actually execute one function from a PE/ELF/Mach-O in a sandboxed CPU and report what it returns. This is the only tool that gives facts instead of guesses about obfuscated licence, password, integrity and anti-debug checks: ptrace returns 0, TracerPid is 0, no debugger is present, time advances, random bytes look real. Call `emulate_list` first when you do not know the function name. Arguments go in a string: numbers may be hex, strings are written str:\"text\" with quotes when they contain commas, and `env` passes the fake JNIEnv (supplied automatically for a symbol starting with Java_). engine=qemu runs the function in a real process instead, which is the only way to run AArch64 floating point, TLS and constructors, but it needs a symbol and takes numbers only.",
             "inputSchema": schema(json!({
                 "path": {"type": "string", "description": "file path; archive members must be extracted first, so pass a real file"},
                 "symbol": {"type": "string", "description": "exported function name"},
@@ -338,6 +340,9 @@ pub fn tools() -> Value {
                 "vfs": {"type": "boolean", "description": "answer file reads with a fake /proc and /dev (default true); turn off to see what the code complains about"},
                 "as_double": {"type": "boolean", "description": "read the result from the floating point register"},
                 "thumb": {"type": "boolean", "description": "target is Thumb code (ARM only)"},
+                "engine": {"type": "string", "enum": ["unicorn", "qemu"], "description": "unicorn (default) executes the code in a sandbox; qemu runs a real process, which is the only way to run AArch64 floating point, TLS and constructors"},
+                "sysroot": {"type": "string", "description": "qemu: target sysroot for the dynamic loader, e.g. /usr/aarch64-linux-gnu"},
+                "harness": {"type": "string", "description": "qemu: a prebuilt harness instead of the cached one"},
                 "json": {"type": "boolean", "description": "return the raw report instead of a summary"}
             }), &["path"])
         },
@@ -676,6 +681,9 @@ pub fn call_tool(name: &str, args: &Value) -> Result<String> {
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
                 thumb: args.get("thumb").and_then(Value::as_bool).unwrap_or(false),
+                engine: opt_str(args, "engine").unwrap_or_else(|| "unicorn".to_string()),
+                sysroot: opt_str(args, "sysroot"),
+                harness: opt_str(args, "harness"),
                 json: args.get("json").and_then(Value::as_bool).unwrap_or(false),
             };
             core::emulate::run_request(&req)

@@ -13,7 +13,7 @@ use crate::emu::{
 use crate::loader::{Arch, Platform};
 use crate::vfs;
 
-fn arg_at(uc: &Uc<'_>, arch: Arch, platform: Platform, index: usize) -> u64 {
+pub(crate) fn arg_at(uc: &Uc<'_>, arch: Arch, platform: Platform, index: usize) -> u64 {
     let regs = arg_reg_ids(arch, platform);
     if index < regs.len() {
         uc.reg_read(regs[index]).unwrap_or(0)
@@ -46,6 +46,9 @@ fn set_cstr(uc: &mut Uc<'_>, addr: u64, text: &str) -> usize {
 }
 
 pub fn call(uc: &mut Uc<'_>, st: &mut State, name: &str) -> u64 {
+    if let Some(jni) = name.strip_prefix("JNI:") {
+        return crate::jni::call(uc, st, jni);
+    }
     let arch = st.arch;
     let platform = st.platform;
     let astr = |i: usize, max: usize| arg_str(uc, arch, platform, i, max);

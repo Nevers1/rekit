@@ -22,7 +22,7 @@ pub type Uc<'a> = Unicorn<'a, ()>;
 /// Where import thunks live. Slot 0 is the return sentinel.
 pub const STUB_BASE: u64 = 0x3000_0000;
 pub const STUB_STRIDE: u64 = 16;
-pub const STUB_SLOTS: u64 = 1024;
+pub const STUB_SLOTS: u64 = 2048;
 pub const SENTINEL: u64 = STUB_BASE;
 
 pub const HEAP_BASE: u64 = 0x2000_0000;
@@ -35,6 +35,8 @@ pub const STACK_SIZE: u64 = 0x0010_0000;
 pub enum Arg {
     Num(u64),
     Str(String),
+    /// The fake `JNIEnv`, for a native method that expects one first.
+    Env,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -87,6 +89,14 @@ pub struct State {
     pub notes: Vec<String>,
     /// First unmapped access, kept even when emulation continues past it.
     pub fault: Option<Fault>,
+    /// The fake `JNIEnv` handed to native code that calls into Java.
+    pub jni_env: u64,
+    pub jni_table: u64,
+    pub jni_vm: u64,
+    pub jni_objects: HashMap<(crate::jni::Kind, u64), u64>,
+    pub jni_strings: HashMap<u64, String>,
+    /// The JNIEnv note is worth printing once, not once per call.
+    pub jni_noted: bool,
 }
 
 impl State {
@@ -115,6 +125,12 @@ impl State {
             halted: None,
             notes: Vec::new(),
             fault: None,
+            jni_env: 0,
+            jni_table: 0,
+            jni_vm: 0,
+            jni_objects: HashMap::new(),
+            jni_strings: HashMap::new(),
+            jni_noted: false,
         }
     }
 
@@ -337,6 +353,10 @@ impl Machine {
             write_ptr(&mut uc, loaded.arch, reloc.addr, value)?;
         }
 
+        // A JNIEnv is always present: it costs a table and costs the guest
+        // nothing, and a native method that never touches it is unaffected.
+        crate::jni::install(&mut uc, &st, &mut stubs)?;
+
         // TLS: a real x86-64 function with a stack protector reads fs:0x28.
         // Giving it a mapped base and a canary keeps that read from faulting.
         if loaded.arch == Arch::X86_64 {
@@ -418,7 +438,7 @@ impl Machine {
         } else {
             0x7ff0_0000
         };
-        self.setup_call(target, args, stack_top, opts.thumb)?;
+        self.setup_call(target, symbol, args, stack_top, opts.thumb)?;
 
         self.st.borrow_mut().start = Instant::now();
         let begin = Instant::now();
@@ -505,7 +525,14 @@ impl Machine {
         })
     }
 
-    fn setup_call(&mut self, target: u64, args: &[Arg], stack_top: u64, thumb: bool) -> Result<()> {
+    fn setup_call(
+        &mut self,
+        target: u64,
+        symbol: Option<&str>,
+        args: &[Arg],
+        stack_top: u64,
+        thumb: bool,
+    ) -> Result<()> {
         let arch = self.loaded.arch;
         let platform = self.loaded.platform;
 
@@ -514,6 +541,13 @@ impl Machine {
         for arg in args {
             match arg {
                 Arg::Num(n) => resolved.push(*n),
+                Arg::Env => {
+                    let env = self.st.borrow().jni_env;
+                    if env == 0 {
+                        bail!("this build has no JNIEnv to pass");
+                    }
+                    resolved.push(env);
+                }
                 Arg::Str(s) => {
                     let addr = {
                         let mut st = self.st.borrow_mut();
@@ -527,6 +561,21 @@ impl Machine {
                         .and_then(|_| self.uc.mem_write(addr + s.len() as u64, &[0]))
                         .map_err(|e| anyhow::anyhow!("cannot write argument: {e}"))?;
                     resolved.push(addr);
+                }
+            }
+        }
+
+        // A native method named the JNI way always takes the environment
+        // first, and callers rarely bother to spell it out. Doing it by name
+        // is safe: an ordinary function called with a literal zero keeps its
+        // zero, so `t_abs(0)` still returns 0.
+        if crate::jni::wants_env(symbol) {
+            let env = self.st.borrow().jni_env;
+            if env != 0 {
+                if resolved.is_empty() {
+                    resolved.push(env);
+                } else if resolved[0] == 0 {
+                    resolved[0] = env;
                 }
             }
         }
@@ -660,7 +709,7 @@ impl Machine {
     }
 }
 
-fn stub_for(
+pub(crate) fn stub_for(
     uc: &mut Uc<'_>,
     st: &Rc<RefCell<State>>,
     stubs: &mut HashMap<String, u64>,
@@ -861,7 +910,10 @@ fn on_stub(uc: &mut Uc<'_>, st: &Rc<RefCell<State>>, arch: Arch, addr: u64) {
         return;
     }
     let name = state.import_names.get(index).cloned().unwrap_or_default();
-    state.count_call(&name);
+    // The prefix keeps JNI entries out of the import namespace; the report
+    // reads better without it.
+    let shown = name.strip_prefix("JNI:").unwrap_or(&name).to_string();
+    state.count_call(&shown);
     let value = imports::call(uc, &mut state, &name);
     if state.halted.is_some() {
         return;
