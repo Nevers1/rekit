@@ -59,6 +59,14 @@ missing tools, broken shebangs, parsing human output back into structure.
 cargo install --git https://github.com/Nevers1/rekit rekit-cli
 ```
 
+That gives you the analysis core. `emulate` lives in a separate binary
+(`rekit-emu`, GPL-2.0 because it links Unicorn); install it only if you want
+emulation:
+
+```sh
+cargo install --git https://github.com/Nevers1/rekit rekit-emu
+```
+
 Or from a checkout:
 
 ```sh
@@ -250,11 +258,11 @@ Honest scope for `0.1`: everything here is static.
   binary XML, plus magic-byte detection for DEX, JAR, APK, wasm, PDF, SQLite and
   Android boot images. Nothing is executed and no external tool is needed.
 - **Disassembly, decompilation and carving are wrappers** around `llvm-objdump`,
-  `r2`, `jadx`, `apktool`, `binwalk`, `frida` and `vol`. `doctor` reports what is
+  `r2`, `jadx`, `apktool` and `binwalk`. `doctor` reports what is
   missing instead of failing later.
 - DEX, JVM and .NET get format detection and offsets, not structure: use
   `decompile` (jadx) or `ilspycmd` for the decompiled view. `ilspycmd` is not
-  installed here, so `doctor` marks it missing.
+  bundled, so `doctor` shows it as missing until you install it.
 - `ar`/`deb` payloads are recognised but not unpacked.
 - No unpacking of VMProtect/Themida. `rekit` tells you a binary is packed; it
   does not defeat the packer.
