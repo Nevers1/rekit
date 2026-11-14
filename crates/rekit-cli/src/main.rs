@@ -100,7 +100,7 @@ enum Command {
     /// Crypto constants and grouped imports.
     Scan {
         path: String,
-        #[arg(long, default_value = "all")]
+        #[arg(long, default_value = "apis")]
         kind: String,
         /// kind=const: the constant to find.
         #[arg(long)]
@@ -114,7 +114,7 @@ enum Command {
         /// kind=probe: trial argument.
         #[arg(long, default_value = "1")]
         arg: String,
-        #[arg(long, default_value_t = 50)]
+        #[arg(long, default_value_t = 60)]
         limit: usize,
         #[arg(long)]
         json: bool,

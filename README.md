@@ -121,7 +121,7 @@ paragraph in the system prompt.
 | `imports` | What can it do — imported symbols with their library, filterable by name. |
 | `exports` | What does it offer — exported symbols with addresses, filterable. An archive is answered with its entry list. |
 | `antidebug` | Is it fighting analysis? Scored verdict, not a wall of matches. |
-| `scan` | Crypto constants (AES S-box, SHA-256 K, ChaCha sigma) and imports grouped into anti/crypto/net/mem/priv. |
+| `scan` | Mass scanning without decompiling: known crypto constants, your own constant (`--value`), imports grouped by purpose, and a probe of every export. |
 | `archive` | What is inside this APK/JAR/zip/tar.gz, so I can pick a `path::inner`. |
 | `manifest` | The decoded `AndroidManifest.xml` of an APK: package, version, permissions, exported components. No apktool, no unpacking. |
 | `apktool` | The whole package decoded: readable manifest, `res/values`, layouts, smali. Cached, and searchable by `pattern`. |
@@ -162,6 +162,8 @@ rekit grep smali 'invoke.*getDeviceId' --mode text --regex
 rekit hex libnative.so --offset 0x2a8 --length 64
 rekit antidebug libnative.so
 rekit scan libnative.so --kind apis
+rekit scan libnative.so --kind const --value 0xDEADBEEF --width 4
+rekit scan libnative.so --kind probe --arg 42 --limit 20
 rekit imports libnative.so --limit 20
 rekit manifest app.apk::AndroidManifest.xml
 rekit decompile app.apk --class com.example.MainActivity

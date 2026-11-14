@@ -210,12 +210,12 @@ pub fn tools() -> Value {
             "description": "Three scans in one, no decompilation needed. kind=const: with `value` it finds where your constant sits in the code (both byte orders, naming the function when rabin2 knows one), without it it reports known crypto constants (AES S-box, SHA-256 K, ChaCha sigma, Base64 alphabet). kind=apis groups imports into anti/crypto/net/mem/file/procmem/ui/priv/other. kind=probe calls every exported function once with a trial argument and shows which return something — the quickest way to find where the interesting code is. kind=all does const and apis.",
             "inputSchema": schema(json!({
                 "path": {"type": "string"},
-                "kind": {"type": "string", "enum": ["const", "apis", "probe", "all"], "description": "default all"},
+                "kind": {"type": "string", "enum": ["const", "apis", "probe", "all"], "description": "default apis"},
                 "value": {"type": "string", "description": "kind=const: the constant to find, e.g. 0xDEADBEEF, 1234 or 0x5A,0x5B"},
                 "width": {"type": "integer", "description": "kind=const: how many bytes the constant occupies, default 4"},
                 "category": {"type": "string", "description": "kind=apis: only this group (anti, crypto, net, mem, file, procmem, ui, priv)"},
                 "arg": {"type": "string", "description": "kind=probe: trial argument, default 1"},
-                "limit": {"type": "integer", "description": "default 50"},
+                "limit": {"type": "integer", "description": "default 60"},
                 "json": {"type": "boolean", "description": "kind=probe: print the emulator's own JSON"}
             }), &["path"])
         },
@@ -622,8 +622,8 @@ pub fn call_tool(name: &str, args: &Value) -> Result<String> {
             let path = str_arg(args, "path")?;
             let kind = opt_str(args, "kind")
                 .or_else(|| opt_str(args, "mode"))
-                .unwrap_or_else(|| "all".to_string());
-            let limit = (num_arg(args, "limit", 50) as usize).clamp(1, 5_000);
+                .unwrap_or_else(|| "apis".to_string());
+            let limit = (num_arg(args, "limit", 60) as usize).clamp(1, 5_000);
             match kind.as_str() {
                 "const" => match opt_str(args, "value") {
                     Some(value) => {
