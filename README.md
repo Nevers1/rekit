@@ -98,9 +98,10 @@ opencode mcp add rekit --global -- rekit mcp
 }
 ```
 
-Tools are named `info`, `strings`, `grep`, `hex`, `entropy`, `imports`,
-`exports`, `antidebug`, `scan`, `archive`, `manifest`, `decompile`, `disasm`,
-`r2`, `patch`, `binwalk`, `emulate`, `emulate_list` and `doctor`; clients prefix
+The tools are `info`, `strings`, `grep`, `hex`, `entropy`, `imports`, `exports`,
+`antidebug`, `scan`, `archive`, `manifest`, `apktool`, `resources`, `decompile`,
+`javap`, `dotnet`, `ghidra`, `ida`, `disasm`, `r2`, `asm`, `diff`, `patch`,
+`binwalk`, `emulate`, `emulate_list`, `fuzz`, `hook` and `doctor`; clients prefix
 them with the server name, so the agent sees `rekit_info`.
 
 The server also ships usage instructions in the `initialize` response, so the
@@ -122,13 +123,23 @@ paragraph in the system prompt.
 | `scan` | Crypto constants (AES S-box, SHA-256 K, ChaCha sigma) and imports grouped into anti/crypto/net/mem/priv. |
 | `archive` | What is inside this APK/JAR/zip/tar.gz, so I can pick a `path::inner`. |
 | `manifest` | The decoded `AndroidManifest.xml` of an APK: package, version, permissions, exported components. No apktool, no unpacking. |
+| `apktool` | The whole package decoded: readable manifest, `res/values`, layouts, smali. Cached, and searchable by `pattern`. |
+| `resources` | What an APK's zip holds — resource groups, layouts, drawables, assets — and one named XML decoded in place. |
 | `decompile` | jadx to Java, cached. Lists classes, or returns one class source by name. |
+| `javap` | JVM bytecode with the constant pool, for a `.class` or a class inside a jar. |
+| `dotnet` | A .NET assembly to exact C# through `ilspycmd`: list types, or decompile one. |
+| `ghidra` | Native code to C through Ghidra headless, analysed once and reopened from its project. |
+| `ida` | The same for IDA's Hex-Rays, through `idalib` and a cached `.i64`. |
 | `disasm` | Disassembly by symbol or address range (llvm-objdump, objdump fallback). |
 | `r2` | One r2 shot: functions, `aflj`, pseudo-C, xrefs, imports, sections. |
+| `asm` | Assemble instructions to bytes, or write them in after `expect` matches. |
+| `diff` | What changed between two versions: functions added, removed, modified. |
 | `patch` | Write bytes at an offset, but only after `expect` matches what is already there. |
 | `binwalk` | Embedded files and firmware signatures, optionally carved out. |
 | `emulate_list` | Which functions can be called, with addresses and architecture. |
 | `emulate` | Run one function in a sandboxed CPU and get the real return value — through the anti-debug checks. |
+| `fuzz` | The same call over a range of inputs: where the return changes, which input is the key, which one crashes. |
+| `hook` | A Frida script that logs a function's real arguments and return value; optionally runs the process. |
 | `doctor` | Which external tools exist and their versions, so a missing dependency is explained. |
 
 ## CLI
@@ -152,6 +163,15 @@ rekit patch libnative.so --offset 0x2a8 --bytes "90 90" --expect "f3 0f"
 rekit binwalk firmware.bin --extract
 rekit emulate libnative.so --symbol check_license --args 'str:"AAAA-BBBB"'
 rekit emulate-list libnative.so --filter check
+rekit fuzz libnative.so --symbol check_license --mode magic --start 0 --end 65535 --target 1
+rekit hook libnative.so --symbol check_license --mode spawn --spawn ./app
+rekit ghidra libnative.so --symbol JNI_OnLoad
+rekit ida libnative.so --symbol JNI_OnLoad
+rekit dotnet tool.dll --type Demo.Checker
+rekit javap classes --class com.example.Foo
+rekit apktool app.apk --pattern "https://"
+rekit asm "mov eax, 1; ret" --path libnative.so --patch --offset 0x2a8 --expect "f3 0f"
+rekit diff old.so new.so
 rekit doctor
 ```
 
@@ -171,6 +191,25 @@ entry is used for the cache path, so a hostile entry called `../../etc/passwd`
 cannot escape the cache directory.
 
 Supported containers: zip (APK, JAR, IPA payloads), tar.gz, plain gz.
+
+## Four decompilers, one contract
+
+`ghidra`, `ida`, `dotnet` and `javap` all answer "what does this function do",
+so they take the same three things: `--symbol` for a name, `--address` in hex,
+or neither for a list. Two details are handled here rather than left to the
+caller:
+
+- **Ghidra rebases ELF images by `0x100000`**, so an address copied from
+  `disasm` or `info` matches nothing in it. It is retried as image base +
+  offset, and the answer says so instead of pretending.
+- **A jar goes on the classpath itself.** Putting the directory that holds it
+  on `-cp` does not make `javap` look inside, which is why the old script never
+  read a jar at all; a missing class answers with the dotted names the archive
+  does contain.
+
+Addresses are always hex: `0x2040` and `2040` both mean `0x2040`. Reading `2040`
+as decimal would silently decompile a different function, which is worse than
+refusing.
 
 ## Running it, not guessing
 
@@ -250,24 +289,90 @@ Honest limits, because a wrong number is worse than no number:
 - **Floating point on 32-bit ARM** (VFP/NEON) is not executable by Unicorn 2.1;
   use `r2` or `disasm` there.
 
+
+### One function, many inputs
+
+`emulate` answers one input. `fuzz` answers the range, in one process: the
+binary is loaded once and the function called per value in a fresh machine, so
+a function that writes to its own globals cannot taint the next input.
+
+```console
+$ rekit fuzz libfuzz.so --symbol step --mode sweep --start 0 --end 30 --step 5
+fuzz  mode sweep  step at 0x40001109
+x86_64/linux  range 0..30 step 5
+runs: 7
+distinct returns: 3
+             0: 2 values, 0..5
+             1: 2 values, 10..15
+             2: 3 values, 20..30
+transitions:
+  input 5 -> 10: return 0 -> 1
+  input 15 -> 20: return 1 -> 2
+```
+
+Four modes, one question each:
+
+| Mode | Question |
+| --- | --- |
+| `probe` | What happens for this one input? |
+| `sweep` | Where does the answer change? |
+| `magic` | Which input returns the value I want? `--target 1` is the keygen for a licence check. |
+| `crash` | Which inputs make it fault, and at which address? |
+
+A crash carries the access type, the address and the instruction that made it:
+Unicorn's own error says only "read from unmapped memory", so a memory hook
+records the rest. A run that stops without touching bad memory is reported with
+the import it called instead — a stack canary that fires is `__stack_chk_fail`,
+not a buffer overrun.
+
+A sweep is the same static address called with different numbers, so a function
+that no number can crash answers "nothing crashed", which is also an answer.
+
+### Hooks: what really gets passed
+
+Emulation is still offline. `hook` writes a Frida script that attaches to a
+running process and prints the arguments and return value of the function as it
+is actually called:
+
+```console
+$ rekit hook libhooklib.so --symbol hooked --mode spawn --spawn ./host
+[+] hooked @ 0x7fa5886970e9
+[->] hooked(a0=0x1)
+[<-] hooked = 0x3
+```
+
+The generated script runs unchanged on Frida 16 and 17: 17 replaced
+`Module.findExportByName` with `Module.getGlobalExportByName`, so both are
+tried. `mode=spawn` drives Frida's Python API rather than its REPL, because the
+REPL exits when its stdin closes and takes every message still in flight with
+it — the hook attached, then printed nothing.
+
+For a stripped binary, `--address 0x11bd` hooks by file address. The offset into
+the mapped module is computed from the binary's image base, which is the part a
+shared object (`0`) and a PE (`0x140000000`, or whatever its linker picked)
+disagree about.
+
 ## What it does not do yet
 
-Honest scope for `0.1`: everything here is static.
+Honest scope for `0.1`.
 
 - **Formats are parsed in Rust**: ELF, PE, Mach-O, zip, tar.gz, gz, Android
   binary XML, plus magic-byte detection for DEX, JAR, APK, wasm, PDF, SQLite and
   Android boot images. Nothing is executed and no external tool is needed.
-- **Disassembly, decompilation and carving are wrappers** around `llvm-objdump`,
-  `r2`, `jadx`, `apktool` and `binwalk`. `doctor` reports what is
-  missing instead of failing later.
+- **Disassembly, decompilation, carving and hooks are wrappers** around
+  `llvm-objdump`, `r2`, `jadx`, `apktool`, `binwalk`, Ghidra, IDA, `ilspycmd`,
+  `javap` and `frida`. `doctor` reports what is missing instead of failing
+  later.
 - DEX, JVM and .NET get format detection and offsets, not structure: use
-  `decompile` (jadx) or `ilspycmd` for the decompiled view. `ilspycmd` is not
-  bundled, so `doctor` shows it as missing until you install it.
+  `decompile`, `javap` or `dotnet` for the readable view.
 - `ar`/`deb` payloads are recognised but not unpacked.
 - No unpacking of VMProtect/Themida. `rekit` tells you a binary is packed; it
   does not defeat the packer.
-- Emulation is function level, not program level: `emulate` calls the function
-  you name, it does not boot the binary as a process.
+- Emulation is function level, not program level: `emulate` and `fuzz` call the
+  function you name. `hook` runs the whole program, but only through Frida, and
+  only on the host it runs on.
+- JNI is not emulated: a function that expects a real `JNIEnv` gets none, so
+  native code calling back into Java faults instead of answering.
 
 Next on the list: program-level emulation, so a binary can be run until a
 specific branch instead of only one function at a time.

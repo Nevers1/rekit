@@ -9,7 +9,9 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
-use unicorn_engine::unicorn_const::{uc_error, Arch as UcArch, MemType, Mode, Prot, Query};
+use unicorn_engine::unicorn_const::{
+    uc_error, Arch as UcArch, HookType, MemType, Mode, Prot, Query,
+};
 use unicorn_engine::{RegisterARM, RegisterARM64, RegisterX86, Unicorn, X86Insn};
 
 use crate::imports;
@@ -83,6 +85,8 @@ pub struct State {
     pub handles: Vec<FileHandle>,
     pub halted: Option<(Stop, String)>,
     pub notes: Vec<String>,
+    /// First unmapped access, kept even when emulation continues past it.
+    pub fault: Option<Fault>,
 }
 
 impl State {
@@ -110,6 +114,7 @@ impl State {
             handles: Vec::new(),
             halted: None,
             notes: Vec::new(),
+            fault: None,
         }
     }
 
@@ -208,6 +213,24 @@ pub struct ReturnValue {
     pub f64: Option<f64>,
 }
 
+/// The moment emulation hit memory it should not have.
+///
+/// Unicorn returns only "read from unmapped memory": neither the address nor
+/// the instruction is in the error, so both are recorded from a memory hook and
+/// the program counter. For a fuzzer this is the whole point — the address is
+/// what tells you whether the input overran a buffer.
+#[derive(serde::Serialize, Clone, Debug)]
+pub struct Fault {
+    /// read, write or fetch
+    pub access: &'static str,
+    /// Address the access went to.
+    pub address: u64,
+    /// Size in bytes.
+    pub size: u64,
+    /// Instruction that made the access.
+    pub pc: u64,
+}
+
 #[derive(serde::Serialize)]
 pub struct Report {
     pub ok: bool,
@@ -225,6 +248,9 @@ pub struct Report {
     /// `/proc/self/status` shows up here even when it says nothing.
     pub files: Vec<String>,
     pub notes: Vec<String>,
+    /// Where execution hit unmapped memory, when it did.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fault: Option<Fault>,
     pub elapsed_ms: u64,
 }
 
@@ -346,8 +372,36 @@ impl Machine {
             uc.add_insn_sys_hook(X86Insn::SYSCALL, 1, 0, move |uc| on_syscall(uc, &st2, arch))
                 .map_err(|e| anyhow::anyhow!("cannot hook syscall: {e}"))?;
         }
-        // Hint for later; the memory hook is not needed for correctness.
-        let _ = MemType::READ;
+        {
+            // Unicorn's error says only "read from unmapped memory", which is
+            // useless without the address. The hook sees it, records it, and
+            // returns false so the engine still raises the error and stops.
+            let st2 = Rc::clone(&st);
+            uc.add_mem_hook(
+                HookType::MEM_READ_UNMAPPED
+                    | HookType::MEM_WRITE_UNMAPPED
+                    | HookType::MEM_FETCH_UNMAPPED,
+                1,
+                0,
+                move |uc, kind, address, size, _| {
+                    let mut state = st2.borrow_mut();
+                    if state.fault.is_none() {
+                        state.fault = Some(Fault {
+                            access: match kind {
+                                MemType::WRITE_UNMAPPED => "write",
+                                MemType::FETCH_UNMAPPED => "fetch",
+                                _ => "read",
+                            },
+                            address,
+                            size: size as u64,
+                            pc: uc.reg_read(pc_reg_id(state.arch)).unwrap_or(0),
+                        });
+                    }
+                    false
+                },
+            )
+            .map_err(|e| anyhow::anyhow!("cannot hook memory: {e}"))?;
+        }
 
         Ok(Machine { uc, st, loaded })
     }
@@ -446,6 +500,7 @@ impl Machine {
             unimplemented: state.unknown.clone(),
             files: state.files.iter().map(|f| f.path.clone()).collect(),
             notes: state.notes.clone(),
+            fault: state.fault.clone(),
             elapsed_ms: begin.elapsed().as_millis() as u64,
         })
     }

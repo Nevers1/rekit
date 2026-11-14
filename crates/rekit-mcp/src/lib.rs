@@ -333,6 +333,40 @@ pub fn tools() -> Value {
             }), &["path"])
         },
         {
+            "name": "hook",
+            "description": "Generate a Frida script that logs the arguments and return value of a native function when it is actually called — the one thing static analysis cannot tell you. mode=gen prints the script (Frida 16 and 17 compatible); mode=spawn writes it and runs a local command under Frida, returning what it printed.",
+            "inputSchema": schema(json!({
+                "path": {"type": "string", "description": "binary, so the generator can see its arch, exports and image base"},
+                "symbol": {"type": "string", "description": "exported function to hook"},
+                "address": {"type": "string", "description": "hex file address instead of a name (for stripped binaries)"},
+                "module": {"type": "string", "description": "module name as Frida sees it; defaults to the file name"},
+                "args": {"type": "integer", "description": "how many arguments to log, default 4"},
+                "onEnter": {"type": "string", "description": "extra JS to run in onEnter"},
+                "onLeave": {"type": "string", "description": "extra JS to run in onLeave"},
+                "mode": {"type": "string", "enum": ["gen", "spawn"], "description": "default gen"},
+                "spawn": {"type": "string", "description": "spawn: the command to start, e.g. /usr/bin/app --flag"}
+            }), &["symbol"])
+        },
+        {
+            "name": "fuzz",
+            "description": "Run one function over many inputs in the emulator. probe explains a single call; sweep calls it once per value and reports where the return changes (the thresholds); magic finds the input that returns a chosen value, which is a keygen for licence checks; crash finds inputs that make it fault, with the address it touched. Much stronger than guessing from decompiled code.",
+            "inputSchema": schema(json!({
+                "path": {"type": "string", "description": "file path; archive members must be extracted first"},
+                "symbol": {"type": "string", "description": "function to call"},
+                "address": {"type": "string", "description": "hex address instead of a name"},
+                "mode": {"type": "string", "enum": ["probe", "sweep", "magic", "crash"], "description": "default probe"},
+                "args": {"type": "string", "description": "probe: arguments for one call, e.g. 42 or str:hello"},
+                "start": {"type": "integer", "description": "first value, may be negative (default 0)"},
+                "end": {"type": "integer", "description": "last value, inclusive (default 4096)"},
+                "step": {"type": "integer", "description": "step between values (default 1)"},
+                "target": {"type": "string", "description": "magic: the return value to look for, decimal or 0x hex (default 1)"},
+                "limit": {"type": "integer", "description": "max runs (default 500)"},
+                "vfs": {"type": "boolean", "description": "answer file reads with a fake /proc (default true)"},
+                "thumb": {"type": "boolean", "description": "target is Thumb code (ARM only)"},
+                "json": {"type": "boolean", "description": "return the emulator's raw JSON"}
+            }), &["path"])
+        },
+        {
             "name": "emulate_list",
             "description": "Functions that `emulate` can call, with addresses and the detected architecture. Use this to pick a target.",
             "inputSchema": schema(json!({
@@ -517,6 +551,38 @@ pub fn call_tool(name: &str, args: &Value) -> Result<String> {
                 "patched {} at 0x{:x}: {} -> {} ({} bytes)\n",
                 res.path, res.offset, res.before, res.after, res.size
             ))
+        }
+        "hook" => {
+            let req = core::hook::Request {
+                path: opt_str(args, "path"),
+                symbol: opt_str(args, "symbol"),
+                address: opt_str(args, "address"),
+                module: opt_str(args, "module"),
+                args: num_arg(args, "args", 4) as usize,
+                on_enter: opt_str(args, "onEnter"),
+                on_leave: opt_str(args, "onLeave"),
+                mode: opt_str(args, "mode").unwrap_or_else(|| "gen".to_string()),
+                spawn: opt_str(args, "spawn"),
+            };
+            core::hook::run(&req)
+        }
+        "fuzz" => {
+            let req = core::fuzz::Request {
+                path: str_arg(args, "path")?,
+                symbol: opt_str(args, "symbol"),
+                address: opt_str(args, "address"),
+                mode: opt_str(args, "mode").unwrap_or_else(|| "probe".to_string()),
+                args: opt_str(args, "args").unwrap_or_default(),
+                start: args.get("start").and_then(Value::as_i64).unwrap_or(0),
+                end: args.get("end").and_then(Value::as_i64).unwrap_or(4096),
+                step: args.get("step").and_then(Value::as_i64).unwrap_or(1),
+                target: opt_str(args, "target").unwrap_or_else(|| "1".to_string()),
+                limit: num_arg(args, "limit", 500) as usize,
+                vfs: args.get("vfs").and_then(Value::as_bool).unwrap_or(true),
+                thumb: args.get("thumb").and_then(Value::as_bool).unwrap_or(false),
+                json: args.get("json").and_then(Value::as_bool).unwrap_or(false),
+            };
+            core::fuzz::run(&req)
         }
         "emulate" => {
             let path = core::emulate::prepare_path(&str_arg(args, "path")?)?;
@@ -878,7 +944,7 @@ mod tests {
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted.len(), names.len());
-        assert_eq!(names.len(), 27);
+        assert_eq!(names.len(), 29);
     }
 
     #[test]

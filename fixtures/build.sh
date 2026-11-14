@@ -9,6 +9,9 @@ set -e
 cd "$(dirname "$0")"
 
 gcc -shared -fPIC -O0 -o libbasic.so basic.c
+gcc -shared -fPIC -O0 -o libfuzz.so fuzz.c
+gcc -shared -fPIC -O0 -o libhooklib.so hooklib.c
+gcc -O0 -o hookhost host.c -L. -lhooklib -Wl,-rpath,'$ORIGIN'
 
 if command -v aarch64-linux-gnu-gcc >/dev/null 2>&1; then
     aarch64-linux-gnu-gcc -shared -fPIC -O0 -fno-stack-protector \
@@ -30,4 +33,4 @@ else
 fi
 
 echo "built:"
-ls -1 *.so *.dll 2>/dev/null
+ls -1 *.so *.dll hookhost 2>/dev/null

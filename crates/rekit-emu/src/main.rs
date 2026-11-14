@@ -36,6 +36,8 @@ enum Command {
     Run(RunArgs),
     /// List the functions this binary exports, with addresses.
     List(ListArgs),
+    /// Call one function once per value in a range.
+    Sweep(SweepArgs),
 }
 
 #[derive(Parser)]
@@ -94,6 +96,61 @@ struct ListArgs {
     /// Print JSON.
     #[arg(long)]
     json: bool,
+}
+
+/// Call one function once per value in a range.
+///
+/// This exists so a sweep is one process, not one per input: loading a binary
+/// costs more than calling a small function, and the fuzzer's result is the
+/// whole range, not a single call.
+#[derive(Parser)]
+struct SweepArgs {
+    /// Binary to load.
+    path: PathBuf,
+
+    /// Exported function to call.
+    #[arg(long, conflicts_with = "address")]
+    symbol: Option<String>,
+
+    /// Address to call, in hex or decimal.
+    #[arg(long, value_parser = parse_address)]
+    address: Option<u64>,
+
+    /// First value (may be negative).
+    #[arg(long, default_value_t = 0, allow_hyphen_values = true)]
+    from: i64,
+
+    /// Last value, inclusive (may be negative).
+    #[arg(long, default_value_t = 4096, allow_hyphen_values = true)]
+    to: i64,
+
+    /// Step between values.
+    #[arg(long, default_value_t = 1, allow_hyphen_values = true)]
+    step: i64,
+
+    /// Maximum number of runs.
+    #[arg(long, default_value_t = 500)]
+    limit: usize,
+
+    /// Print one JSON object instead of the human table.
+    #[arg(long)]
+    json: bool,
+
+    /// Stop after this many instructions per run (0 means no limit).
+    #[arg(long, default_value_t = 2_000_000)]
+    max_insns: u64,
+
+    /// Wall clock limit per run in milliseconds.
+    #[arg(long, default_value_t = 5_000)]
+    timeout_ms: u64,
+
+    /// Treat the target as Thumb code (ARM only).
+    #[arg(long)]
+    thumb: bool,
+
+    /// Do not answer file reads: only the binary's own memory exists.
+    #[arg(long)]
+    no_vfs: bool,
 }
 
 fn parse_address(text: &str) -> Result<u64, String> {
@@ -171,6 +228,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
     match cli.command {
         Command::List(args) => list(args),
         Command::Run(args) => run_one(args),
+        Command::Sweep(args) => sweep(args),
     }
 }
 
@@ -221,33 +279,8 @@ fn run_one(args: RunArgs) -> Result<ExitCode> {
     let loaded =
         loader::load(&bytes).with_context(|| format!("cannot parse {}", args.path.display()))?;
 
-    let (target, symbol) = if let Some(address) = args.address {
-        (address, None)
-    } else if let Some(name) = &args.symbol {
-        match loaded.find_symbol(name) {
-            Some(addr) => (addr, Some(name.clone())),
-            None => {
-                let mut close: Vec<&str> = loaded
-                    .symbols
-                    .iter()
-                    .map(|(n, _)| n.as_str())
-                    .filter(|n| n.contains(name.as_str()))
-                    .take(10)
-                    .collect();
-                close.sort_unstable();
-                let hint = if close.is_empty() {
-                    String::new()
-                } else {
-                    format!("; did you mean: {}", close.join(", "))
-                };
-                bail!("symbol {name:?} is not exported by this file{hint}");
-            }
-        }
-    } else if args.entry {
-        (loaded.entry, None)
-    } else {
-        bail!("pass --symbol, --address or --entry");
-    };
+    let (target, symbol) =
+        resolve_target(&loaded, args.symbol.as_deref(), args.address, args.entry)?;
 
     let cargs = parse_args(&args.args)?;
     let opts = Options {
@@ -305,6 +338,143 @@ fn run_one(args: RunArgs) -> Result<ExitCode> {
     } else {
         ExitCode::from(1)
     })
+}
+
+/// Turn `--symbol` / `--address` / `--entry` into an address, naming the
+/// symbol when it was a name. The "did you mean" list matters here: a fuzz
+/// sweep against a misspelt export otherwise reports zero runs.
+fn resolve_target(
+    loaded: &loader::Loaded,
+    symbol: Option<&str>,
+    address: Option<u64>,
+    entry: bool,
+) -> Result<(u64, Option<String>)> {
+    if let Some(address) = address {
+        return Ok((address, None));
+    }
+    if let Some(name) = symbol {
+        return match loaded.find_symbol(name) {
+            Some(addr) => Ok((addr, Some(name.to_string()))),
+            None => {
+                let mut close: Vec<&str> = loaded
+                    .symbols
+                    .iter()
+                    .map(|(n, _)| n.as_str())
+                    .filter(|n| n.contains(name))
+                    .take(10)
+                    .collect();
+                close.sort_unstable();
+                let hint = if close.is_empty() {
+                    String::new()
+                } else {
+                    format!("; did you mean: {}", close.join(", "))
+                };
+                bail!("symbol {name:?} is not exported by this file{hint}");
+            }
+        };
+    }
+    if entry {
+        return Ok((loaded.entry, None));
+    }
+    bail!("pass --symbol, --address or --entry")
+}
+
+/// One value per run, each in a fresh machine: a function that writes to its
+/// own globals must not change the answer for the next input.
+fn sweep(args: SweepArgs) -> Result<ExitCode> {
+    if args.step <= 0 {
+        bail!("--step must be positive");
+    }
+    if args.limit == 0 {
+        bail!("--limit must be at least 1");
+    }
+    if args.from > args.to {
+        bail!("--from {} is greater than --to {}", args.from, args.to);
+    }
+
+    let bytes = read_binary(&args.path)?;
+    let parsed =
+        loader::load(&bytes).with_context(|| format!("cannot parse {}", args.path.display()))?;
+    let (target, symbol) = resolve_target(&parsed, args.symbol.as_deref(), args.address, false)?;
+    drop(parsed);
+
+    let opts = |vfs: bool| Options {
+        max_insns: args.max_insns,
+        timeout_ms: args.timeout_ms,
+        vfs,
+        as_double: false,
+        thumb: args.thumb,
+    };
+    let vfs = !args.no_vfs;
+
+    let mut results: Vec<(i64, emu::Report)> = Vec::new();
+    let mut value = args.from;
+    while value <= args.to && results.len() < args.limit {
+        let loaded = loader::load(&bytes)?;
+        let opts = opts(vfs);
+        let mut machine = Machine::new(loaded, opts.vfs)?;
+        let report = machine.run(target, symbol.as_deref(), &[Arg::Num(value as u64)], &opts)?;
+        results.push((value, report));
+        match value.checked_add(args.step) {
+            Some(next) => value = next,
+            None => break,
+        }
+    }
+
+    if results.is_empty() {
+        bail!("no runs: check --from, --to and --limit");
+    }
+
+    if args.json {
+        // Each row repeats what the envelope already says (arch, address), so
+        // only what changes per run is kept — a 500-run sweep is otherwise
+        // megabytes of identical keys.
+        let rows: Vec<serde_json::Value> = results
+            .iter()
+            .map(|(value, report)| {
+                serde_json::json!({
+                    "value": value,
+                    "ok": report.ok,
+                    "stop": report.stop,
+                    "return": report.ret,
+                    "fault": report.fault,
+                    "calls": report.calls,
+                    "unimplemented": report.unimplemented,
+                    "notes": report.notes,
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "arch": results[0].1.arch,
+                "platform": results[0].1.platform,
+                "address": results[0].1.address,
+                "symbol": symbol,
+                "runs": rows,
+            }))?
+        );
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    for (value, report) in &results {
+        let fault = match &report.fault {
+            Some(fault) => format!(
+                "  fault: {} at {:#x} (size {}) from pc {:#x}",
+                fault.access, fault.address, fault.size, fault.pc
+            ),
+            None => String::new(),
+        };
+        println!(
+            "{value:>12}  {:<14} return {} ({}){fault}",
+            report.stop, report.ret.hex, report.ret.i64
+        );
+    }
+    if results.len() >= args.limit && args.from + (args.limit as i64) * args.step <= args.to {
+        eprintln!("stopped at --limit {}", args.limit);
+    }
+
+    Ok(ExitCode::SUCCESS)
 }
 
 #[cfg(test)]

@@ -258,6 +258,74 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Generate a Frida hook script for a function.
+    Hook {
+        path: Option<String>,
+        /// Exported function to hook.
+        #[arg(long)]
+        symbol: Option<String>,
+        /// Hex file address instead of a name.
+        #[arg(long)]
+        address: Option<String>,
+        /// Module name as Frida sees it.
+        #[arg(long)]
+        module: Option<String>,
+        /// How many arguments to log.
+        #[arg(long, default_value_t = 4)]
+        args: usize,
+        /// Extra JS for onEnter.
+        #[arg(long)]
+        on_enter: Option<String>,
+        /// Extra JS for onLeave.
+        #[arg(long)]
+        on_leave: Option<String>,
+        /// gen | spawn
+        #[arg(long, default_value = "gen")]
+        mode: String,
+        /// spawn: command to start under Frida.
+        #[arg(long)]
+        spawn: Option<String>,
+    },
+    /// Run one function over many inputs: probe, sweep, magic, crash.
+    Fuzz {
+        path: String,
+        /// Function to call.
+        #[arg(long)]
+        symbol: Option<String>,
+        /// Hex address instead of a name.
+        #[arg(long)]
+        address: Option<String>,
+        /// probe | sweep | magic | crash
+        #[arg(long, default_value = "probe")]
+        mode: String,
+        /// probe: arguments for one call, e.g. 42 or str:hello.
+        #[arg(long)]
+        args: Option<String>,
+        /// First value, may be negative.
+        #[arg(long, default_value_t = 0, allow_hyphen_values = true)]
+        start: i64,
+        /// Last value, inclusive.
+        #[arg(long, default_value_t = 4096, allow_hyphen_values = true)]
+        end: i64,
+        /// Step between values.
+        #[arg(long, default_value_t = 1, allow_hyphen_values = true)]
+        step: i64,
+        /// magic: the return value to look for, decimal or 0x hex.
+        #[arg(long, default_value = "1")]
+        target: String,
+        /// Maximum number of runs.
+        #[arg(long, default_value_t = 500)]
+        limit: usize,
+        /// Do not answer file reads: only the binary's own memory exists.
+        #[arg(long)]
+        no_vfs: bool,
+        /// Target is Thumb code (ARM only).
+        #[arg(long)]
+        thumb: bool,
+        /// Print the emulator's raw JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// List the functions `emulate` can call.
     EmulateList {
         path: String,
@@ -482,6 +550,62 @@ fn main() -> Result<()> {
                 "timeout_ms": timeout_ms,
                 "vfs": !no_vfs,
                 "as_double": as_double,
+                "thumb": thumb,
+                "json": json,
+            }),
+        )?,
+        Command::Hook {
+            path,
+            symbol,
+            address,
+            module,
+            args,
+            on_enter,
+            on_leave,
+            mode,
+            spawn,
+        } => render(
+            "hook",
+            json!({
+                "path": path,
+                "symbol": symbol,
+                "address": address,
+                "module": module,
+                "args": args,
+                "onEnter": on_enter,
+                "onLeave": on_leave,
+                "mode": mode,
+                "spawn": spawn,
+            }),
+        )?,
+        Command::Fuzz {
+            path,
+            symbol,
+            address,
+            mode,
+            args,
+            start,
+            end,
+            step,
+            target,
+            limit,
+            no_vfs,
+            thumb,
+            json,
+        } => render(
+            "fuzz",
+            json!({
+                "path": path,
+                "symbol": symbol,
+                "address": address,
+                "mode": mode,
+                "args": args,
+                "start": start,
+                "end": end,
+                "step": step,
+                "target": target,
+                "limit": limit,
+                "vfs": !no_vfs,
                 "thumb": thumb,
                 "json": json,
             }),
