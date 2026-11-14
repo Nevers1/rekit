@@ -113,6 +113,56 @@ enum Command {
     },
     /// Decode an Android binary manifest.
     Manifest { path: String },
+    /// Decompile native code to C with Ghidra.
+    Ghidra {
+        path: String,
+        /// Function name or part of it.
+        #[arg(long)]
+        symbol: Option<String>,
+        /// Function address in hex, e.g. 0x401010.
+        #[arg(long)]
+        address: Option<String>,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        #[arg(long)]
+        reanalyze: bool,
+    },
+    /// Decompile native code to C with IDA and Hex-Rays.
+    Ida {
+        path: String,
+        #[arg(long)]
+        symbol: Option<String>,
+        #[arg(long)]
+        address: Option<String>,
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+    },
+    /// Decompile a .NET assembly to C#.
+    Dotnet {
+        path: String,
+        /// Type to decompile in full.
+        #[arg(long = "type")]
+        ty: Option<String>,
+        #[arg(long)]
+        pattern: Option<String>,
+        #[arg(long)]
+        regex: bool,
+        #[arg(long, default_value_t = 60)]
+        limit: usize,
+    },
+    /// JVM bytecode with javap.
+    Javap {
+        path: String,
+        #[arg(long)]
+        class: Option<String>,
+        #[arg(long)]
+        method: Option<String>,
+        /// Signatures only instead of bytecode.
+        #[arg(long)]
+        signatures: bool,
+        #[arg(long, default_value_t = 200)]
+        limit: usize,
+    },
     /// Embedded files and firmware signatures.
     Binwalk {
         path: String,
@@ -277,6 +327,63 @@ fn main() -> Result<()> {
             json!({"path": path, "class": class, "limit": limit}),
         )?,
         Command::Manifest { path } => render("manifest", json!({"path": path}))?,
+        Command::Ghidra {
+            path,
+            symbol,
+            address,
+            limit,
+            reanalyze,
+        } => render(
+            "ghidra",
+            json!({
+                "path": path,
+                "symbol": symbol,
+                "address": address,
+                "limit": limit,
+                "reanalyze": reanalyze,
+            }),
+        )?,
+        Command::Ida {
+            path,
+            symbol,
+            address,
+            limit,
+        } => render(
+            "ida",
+            json!({"path": path, "symbol": symbol, "address": address, "limit": limit}),
+        )?,
+        Command::Dotnet {
+            path,
+            ty,
+            pattern,
+            regex,
+            limit,
+        } => render(
+            "dotnet",
+            json!({
+                "path": path,
+                "type": ty,
+                "pattern": pattern,
+                "regex": regex,
+                "limit": limit,
+            }),
+        )?,
+        Command::Javap {
+            path,
+            class,
+            method,
+            signatures,
+            limit,
+        } => render(
+            "javap",
+            json!({
+                "path": path,
+                "class": class,
+                "method": method,
+                "code": !signatures,
+                "limit": limit,
+            }),
+        )?,
         Command::Binwalk { path, extract } => {
             render("binwalk", json!({"path": path, "extract": extract}))?
         }

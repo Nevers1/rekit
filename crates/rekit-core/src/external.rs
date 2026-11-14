@@ -24,22 +24,56 @@ pub fn which(tool: &str) -> Option<PathBuf> {
         let path = PathBuf::from(tool);
         return path.is_file().then_some(path);
     }
-    let paths = std::env::var_os("PATH")?;
-    std::env::split_paths(&paths)
+    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|paths| std::env::split_paths(&paths).collect())
+        .unwrap_or_default();
+    // `dotnet tool install -g` drops its binaries in ~/.dotnet/tools and does
+    // not add it to PATH, so ilspycmd would look installed-by-absence.
+    if let Some(home) = std::env::var_os("HOME") {
+        dirs.push(PathBuf::from(home).join(".dotnet").join("tools"));
+    }
+    dirs.into_iter()
         .map(|dir| dir.join(tool))
         .find(|candidate| candidate.is_file())
 }
 
+/// One finished command, with both streams kept apart.
+///
+/// Ghidra and IDA report progress on stdout but errors on stderr, and they
+/// sometimes exit non-zero after doing the work anyway — so the caller needs
+/// to see both before deciding the run failed.
+pub struct Output {
+    pub stdout: String,
+    pub stderr: String,
+    pub success: bool,
+    pub timed_out: bool,
+}
+
 /// Run a command, capture both streams, and never hang: the process is killed
 /// when the deadline passes.
-pub fn run(tool: &str, args: &[String], timeout: Duration) -> Result<String> {
+pub fn capture(
+    tool: &str,
+    args: &[String],
+    timeout: Duration,
+    env: &[(&str, String)],
+    cwd: Option<&Path>,
+) -> Result<Output> {
     let exe = which(tool).ok_or_else(|| anyhow!("{tool} is not installed"))?;
 
-    let mut child = Command::new(&exe)
+    let mut command = Command::new(&exe);
+    command
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
+    for (key, value) in env {
+        command.env(key, value);
+    }
+
+    let mut child = command
         .spawn()
         .with_context(|| format!("cannot start {}", exe.display()))?;
 
@@ -57,14 +91,16 @@ pub fn run(tool: &str, args: &[String], timeout: Duration) -> Result<String> {
     });
 
     let started = Instant::now();
+    let mut timed_out = false;
     let status = loop {
         match child.try_wait()? {
-            Some(status) => break status,
+            Some(status) => break Some(status),
             None => {
                 if started.elapsed() > timeout {
                     let _ = child.kill();
                     let _ = child.wait();
-                    bail!("{tool} timed out after {}s", timeout.as_secs());
+                    timed_out = true;
+                    break None;
                 }
                 std::thread::sleep(Duration::from_millis(25));
             }
@@ -73,13 +109,25 @@ pub fn run(tool: &str, args: &[String], timeout: Duration) -> Result<String> {
 
     let stdout = out_handle.join().unwrap_or_default();
     let stderr = err_handle.join().unwrap_or_default();
-    let text = String::from_utf8_lossy(&stdout).to_string();
 
-    if !status.success() && text.trim().is_empty() {
-        let err = String::from_utf8_lossy(&stderr);
-        bail!("{tool} failed: {}", err.trim());
+    Ok(Output {
+        stdout: cap(String::from_utf8_lossy(&stdout).to_string()),
+        stderr: cap(String::from_utf8_lossy(&stderr).to_string()),
+        success: status.map(|s| s.success()).unwrap_or(false),
+        timed_out,
+    })
+}
+
+/// Run a command and return its stdout, turning a failure into an error.
+pub fn run(tool: &str, args: &[String], timeout: Duration) -> Result<String> {
+    let out = capture(tool, args, timeout, &[], None)?;
+    if out.timed_out {
+        bail!("{tool} timed out after {}s", timeout.as_secs());
     }
-    Ok(cap(text))
+    if !out.success && out.stdout.trim().is_empty() {
+        bail!("{tool} failed: {}", out.stderr.trim());
+    }
+    Ok(out.stdout)
 }
 
 fn cap(text: String) -> String {
@@ -108,6 +156,10 @@ pub struct Tool {
 }
 
 /// What is installed and what is missing, so a failure is explained up front.
+///
+/// Two kinds of tool live here: commands found in PATH, and installations
+/// found by their layout (Ghidra, IDA, the emulation binary). Both are
+/// reported the same way, because "is ida there" is the question being asked.
 pub fn doctor() -> Vec<Tool> {
     const TOOLS: &[(&str, &str)] = &[
         ("llvm-objdump", "disassembly, all formats"),
@@ -123,15 +175,22 @@ pub fn doctor() -> Vec<Tool> {
         ("vol", "memory dumps"),
     ];
 
-    TOOLS
+    let mut tools: Vec<Tool> = TOOLS
         .iter()
         .map(|(name, purpose)| {
             let found = which(name).is_some();
             let version = if found {
+                // A version line is a line with a number in it: several tools
+                // print a usage banner first, and "Usage: javap <options>" is
+                // not a version.
                 run(name, &["--version".to_string()], Duration::from_secs(5))
                     .ok()
-                    .and_then(|out| out.lines().next().map(str::to_string))
-                    .map(|line| line.chars().take(70).collect())
+                    .and_then(|out| {
+                        out.lines()
+                            .find(|line| line.chars().any(|c| c.is_ascii_digit()))
+                            .map(str::to_string)
+                    })
+                    .map(|line| line.trim().chars().take(70).collect())
             } else {
                 None
             };
@@ -142,7 +201,30 @@ pub fn doctor() -> Vec<Tool> {
                 version,
             }
         })
-        .collect()
+        .collect();
+
+    for (name, purpose, at) in [
+        (
+            "ghidra",
+            "native code to C (headless)",
+            crate::ghidra::home(),
+        ),
+        ("ida", "native code to C (Hex-Rays)", crate::ida::home()),
+        (
+            "rekit-emu",
+            "execute a function in a sandboxed CPU",
+            crate::emulate::available(),
+        ),
+    ] {
+        tools.push(Tool {
+            name,
+            purpose,
+            found: at.is_some(),
+            version: at.map(|path| path.display().to_string()),
+        });
+    }
+
+    tools
 }
 
 pub fn disasm(

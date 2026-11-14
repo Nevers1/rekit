@@ -7,12 +7,17 @@
 pub mod antidebug;
 pub mod asm;
 pub mod axml;
+pub mod decompilers;
 pub mod diff;
+pub mod dotnet;
 pub mod emulate;
 pub mod entropy;
 pub mod external;
+pub mod ghidra;
 pub mod hexdump;
+pub mod ida;
 pub mod info;
+pub mod javap;
 pub mod patch;
 pub mod resolve;
 pub mod scan;

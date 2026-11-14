@@ -230,6 +230,49 @@ pub fn tools() -> Value {
             }), &["path"])
         },
         {
+            "name": "ghidra",
+            "description": "Decompile native code (PE/ELF/Mach-O) to C with Ghidra headless. `symbol` matches a name (exact first, then partial), `address` picks a function by hex address, neither lists the functions. The project is cached per input, so the first call takes minutes and later ones seconds. reanalyze=true forces a fresh analysis.",
+            "inputSchema": schema(json!({
+                "path": {"type": "string", "description": "binary, or path::inner inside an archive"},
+                "symbol": {"type": "string", "description": "function name or part of it"},
+                "address": {"type": "string", "description": "hex address, e.g. 0x401010"},
+                "limit": {"type": "integer", "description": "functions to decompile when matching by name, default 20"},
+                "reanalyze": {"type": "boolean", "description": "ignore the cached project and analyse again"}
+            }), &["path"])
+        },
+        {
+            "name": "ida",
+            "description": "Decompile native code to C with IDA and Hex-Rays (idalib) — the best quality on obfuscated code. Same symbol/address convention as `ghidra`. Needs IDA 9.x with idalib; the database is cached per input.",
+            "inputSchema": schema(json!({
+                "path": {"type": "string"},
+                "symbol": {"type": "string", "description": "function name or part of it"},
+                "address": {"type": "string", "description": "hex address, e.g. 0x2040"},
+                "limit": {"type": "integer", "description": "functions to decompile, default 10"}
+            }), &["path"])
+        },
+        {
+            "name": "dotnet",
+            "description": "Decompile a .NET assembly to C# with ilspycmd. `type` returns one type in full; `pattern` searches the decompiled tree (cached per input); neither lists the generated files. Only works on managed assemblies — a native binary gets a pointer to ghidra/ida.",
+            "inputSchema": schema(json!({
+                "path": {"type": "string", "description": "dll/exe, or app.apk::Assembly-CSharp.dll"},
+                "type": {"type": "string", "description": "type name to decompile, e.g. System.Console"},
+                "pattern": {"type": "string", "description": "text to search in the C# code"},
+                "regex": {"type": "boolean", "description": "treat pattern as a regular expression"},
+                "limit": {"type": "integer", "description": "max matches, default 60"}
+            }), &["path"])
+        },
+        {
+            "name": "javap",
+            "description": "JVM bytecode with javap: signatures, constants, and with code=true the bytecode of every method. A bare .class needs no class name (it is read from the file); a jar or apk does.",
+            "inputSchema": schema(json!({
+                "path": {"type": "string", "description": ".class, jar, or archive::entry"},
+                "class": {"type": "string", "description": "fully qualified class name, e.g. com.example.Foo"},
+                "method": {"type": "string", "description": "show only this method"},
+                "code": {"type": "boolean", "description": "bytecode instead of signatures, default true"},
+                "limit": {"type": "integer", "description": "max lines, default 200"}
+            }), &["path"])
+        },
+        {
             "name": "manifest",
             "description": "Decode AndroidManifest.xml from an APK (binary AXML) into readable XML in place, without apktool. Plain text manifests pass through.",
             "inputSchema": schema(json!({
@@ -378,6 +421,46 @@ pub fn call_tool(name: &str, args: &Value) -> Result<String> {
             let class = opt_str(args, "class");
             let limit = (num_arg(args, "limit", 100) as usize).clamp(1, 5_000);
             core::external::decompile(&path, class.as_deref(), limit)
+        }
+        "ghidra" => {
+            let path = str_arg(args, "path")?;
+            let symbol = opt_str(args, "symbol");
+            let address = opt_str(args, "address");
+            let limit = (num_arg(args, "limit", 20) as usize).clamp(1, 200);
+            let reanalyze = args
+                .get("reanalyze")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            core::ghidra::decompile(
+                &path,
+                symbol.as_deref(),
+                address.as_deref(),
+                limit,
+                reanalyze,
+            )
+        }
+        "ida" => {
+            let path = str_arg(args, "path")?;
+            let symbol = opt_str(args, "symbol");
+            let address = opt_str(args, "address");
+            let limit = (num_arg(args, "limit", 10) as usize).clamp(1, 100);
+            core::ida::decompile(&path, symbol.as_deref(), address.as_deref(), limit)
+        }
+        "dotnet" => {
+            let path = str_arg(args, "path")?;
+            let ty = opt_str(args, "type");
+            let pattern = opt_str(args, "pattern");
+            let regex = args.get("regex").and_then(Value::as_bool).unwrap_or(false);
+            let limit = (num_arg(args, "limit", 60) as usize).clamp(1, 5_000);
+            core::dotnet::decompile(&path, ty.as_deref(), pattern.as_deref(), regex, limit)
+        }
+        "javap" => {
+            let path = str_arg(args, "path")?;
+            let class = opt_str(args, "class");
+            let method = opt_str(args, "method");
+            let code = args.get("code").and_then(Value::as_bool).unwrap_or(true);
+            let limit = (num_arg(args, "limit", 200) as usize).clamp(1, 20_000);
+            core::javap::decompile(&path, class.as_deref(), method.as_deref(), code, limit)
         }
         "manifest" => core::axml::render(&str_arg(args, "path")?),
         "binwalk" => {
@@ -730,15 +813,6 @@ fn render_doctor() -> Result<String> {
             tool.name, tool.purpose, version
         ));
     }
-    match core::emulate::available() {
-        Some(path) => out.push_str(&format!(
-            "  ok  {:<14} {:<44} {}\n",
-            "rekit-emu",
-            "execute a function in a sandboxed CPU",
-            path.display()
-        )),
-        None => out.push_str("  --- rekit-emu       execute a function in a sandboxed CPU\n"),
-    }
     if !missing.is_empty() {
         out.push_str(&format!("missing: {}\n", missing.join(", ")));
     }
@@ -774,7 +848,7 @@ mod tests {
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted.len(), names.len());
-        assert_eq!(names.len(), 21);
+        assert_eq!(names.len(), 25);
     }
 
     #[test]
