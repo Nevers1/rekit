@@ -1,0 +1,27 @@
+[package]
+name = "rekit-emu"
+description = "Emulation sidecar for rekit: runs a function with a virtualized environment and returns the real value"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+# Unicorn is GPL-2.0, so this binary is GPL-2.0. The rekit core stays MIT and
+# talks to this program as a separate process; see crates/rekit-emu/LICENSE.
+license = "GPL-2.0-only"
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "rekit-emu"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+goblin.workspace = true
+clap.workspace = true
+unicorn-engine = { version = "2", default-features = false, features = [
+    "arch_x86",
+    "arch_arm",
+    "arch_aarch64",
+] }

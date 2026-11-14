@@ -63,7 +63,11 @@ Or from a checkout:
 
 ```sh
 cargo install --path crates/rekit-cli
+cargo build --release -p rekit-emu   # optional, adds `emulate`
 ```
+
+`rekit emulate` looks for `rekit-emu` next to its own executable, then on the
+`PATH`; point `REKIT_EMU` at it to override both.
 
 ## Use it from an agent
 
@@ -88,8 +92,8 @@ opencode mcp add rekit --global -- rekit mcp
 
 Tools are named `info`, `strings`, `grep`, `hex`, `entropy`, `imports`,
 `exports`, `antidebug`, `scan`, `archive`, `manifest`, `decompile`, `disasm`,
-`r2`, `patch`, `binwalk` and `doctor`; clients prefix them with the server
-name, so the agent sees `rekit_info`.
+`r2`, `patch`, `binwalk`, `emulate`, `emulate_list` and `doctor`; clients prefix
+them with the server name, so the agent sees `rekit_info`.
 
 The server also ships usage instructions in the `initialize` response, so the
 model learns `path::inner` and the `grep` pattern syntax without you writing a
@@ -115,6 +119,8 @@ paragraph in the system prompt.
 | `r2` | One r2 shot: functions, `aflj`, pseudo-C, xrefs, imports, sections. |
 | `patch` | Write bytes at an offset, but only after `expect` matches what is already there. |
 | `binwalk` | Embedded files and firmware signatures, optionally carved out. |
+| `emulate_list` | Which functions can be called, with addresses and architecture. |
+| `emulate` | Run one function in a sandboxed CPU and get the real return value — through the anti-debug checks. |
 | `doctor` | Which external tools exist and their versions, so a missing dependency is explained. |
 
 ## CLI
@@ -136,6 +142,8 @@ rekit disasm libnative.so --symbol JNI_OnLoad
 rekit r2 libnative.so --kind pdc --target entry0
 rekit patch libnative.so --offset 0x2a8 --bytes "90 90" --expect "f3 0f"
 rekit binwalk firmware.bin --extract
+rekit emulate libnative.so --symbol check_license --args 'str:"AAAA-BBBB"'
+rekit emulate-list libnative.so --filter check
 rekit doctor
 ```
 
@@ -156,6 +164,84 @@ cannot escape the cache directory.
 
 Supported containers: zip (APK, JAR, IPA payloads), tar.gz, plain gz.
 
+## Running it, not guessing
+
+Reading decompiled C tells you what a check *looks like*. It does not tell you
+what it *returns* for the input you care about, and obfuscated licence, password
+and integrity checks are exactly where that gap costs hours.
+
+`emulate` executes one function of the binary in Unicorn and prints what comes
+back. Nothing from the file is trusted: it is loaded into a private address
+space, and everything that would leave it — libc, syscalls, Win32, `/proc` — is
+answered by the harness instead.
+
+```console
+$ rekit emulate libbasic.so --symbol ad_probe
+arch      x86_64 / linux
+target    ad_probe at 0x4000126c
+stop      returned
+return    0x0 (0)
+calls     ptrace x1, getppid x1, fopen x1, fgets x2, strncmp x1, fclose x1
+files     /proc/self/status
+```
+
+`ad_probe` is the usual anti-debug kit: `ptrace(PTRACE_TRACEME)`, a `getppid`
+check, and `TracerPid` read out of `/proc/self/status`. On a real machine it
+returns a non-zero bitmask; here it returns **0**, because each check is given
+the answer a clean machine would give:
+
+| Check | What the guest sees |
+| --- | --- |
+| `ptrace(PTRACE_TRACEME)` | 0 — nobody is tracing |
+| `TracerPid` in `/proc/self/status` | 0, and the file is readable |
+| `getppid()` | 1 |
+| `IsDebuggerPresent`, `CheckRemoteDebuggerPresent` | 0 / 0 |
+| `GetTickCount`, `QueryPerformanceCounter`, `clock_gettime` | a clock that moves forward |
+| `getrandom`, `/dev/urandom` | plausible, deterministic bytes |
+| `android.os` properties via `__system_property_get` | `ro.debuggable=0`, `ro.build.tags=release-keys` |
+
+Arguments follow the ABI, so a 32-bit `cdecl` function gets its arguments on the
+stack and a Win64 one in `rcx, rdx, r8, r9` with shadow space:
+
+```console
+$ rekit emulate win64.dll --symbol win_add --args 3,4
+arch      x86_64 / windows
+target    win_add at 0x3b9511450
+stop      returned
+return    0x7 (7)
+```
+
+Strings are written into the emulated heap; quote them when they contain a
+comma, because the argument list itself is comma separated:
+
+```console
+$ rekit emulate libbasic.so --symbol t_strlen --args 'str:"Hello, RE!"'
+return    0xa (10)
+```
+
+The same works for AArch64, ARM and 32-bit PE. `--as-double` reads the result
+from the floating point register instead of the general purpose one.
+
+### What emulation cannot do
+
+Honest limits, because a wrong number is worse than no number:
+
+- **Only the function you name is emulated.** Anything it calls that is not an
+  imported libc/Win32 function must live in the same binary; a call into an
+  unresolved library address is where it stops.
+- **Packer stubs and VMProtect are out of scope.** The bytes have to be real
+  instructions for the CPU to run them.
+- **The virtual filesystem is a fixed set**: `/proc/self/status`, `/proc/self/maps`,
+  `/proc/self/cmdline`, `/dev/urandom`, `/dev/null`. Anything else is "no such
+  file", which is a signal in itself: turn `--no-vfs` on to see which read the
+  code misses.
+- **Remote attestation is still remote.** Play Integrity, SafetyNet, and any
+  check that asks a server are not answered by emulating the client.
+- **Checksums of the file itself** see the file as it is on disk. Patch first,
+  then emulate, or the sum will not match.
+- **Floating point on 32-bit ARM** (VFP/NEON) is not executable by Unicorn 2.1;
+  use `r2` or `disasm` there.
+
 ## What it does not do yet
 
 Honest scope for `0.1`: everything here is static.
@@ -170,11 +256,13 @@ Honest scope for `0.1`: everything here is static.
   `decompile` (jadx) or `ilspycmd` for the decompiled view. `ilspycmd` is not
   installed here, so `doctor` marks it missing.
 - `ar`/`deb` payloads are recognised but not unpacked.
-- No emulation, no unpacking of VMProtect/Themida. `rekit` tells you a binary is
-  packed; it does not defeat the packer.
+- No unpacking of VMProtect/Themida. `rekit` tells you a binary is packed; it
+  does not defeat the packer.
+- Emulation is function level, not program level: `emulate` calls the function
+  you name, it does not boot the binary as a process.
 
-The next step is emulation with a virtualized environment, so an agent can run a
-function behind an anti-debug check and get the real return value.
+Next on the list: program-level emulation, so a binary can be run until a
+specific branch instead of only one function at a time.
 
 ## Development
 
@@ -189,4 +277,12 @@ fresh clone with no samples.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+`rekit` core, CLI and MCP server are **MIT**. See [LICENSE](LICENSE).
+
+`rekit-emu` is a separate binary under **GPL-2.0** (`crates/rekit-emu/LICENSE`),
+because it links [Unicorn](https://www.unicorn-engine.org/), which is GPL-2.0.
+Keeping emulation in its own process is deliberate: the MIT part never links
+GPL code, and the GPL part never gets in the way of using `rekit` itself.
+
+If you redistribute both together, the combined distribution has to satisfy
+both licenses — GPL-2.0 for `rekit-emu`, MIT for the rest.

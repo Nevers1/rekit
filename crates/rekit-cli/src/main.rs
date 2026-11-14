@@ -129,6 +129,42 @@ enum Command {
         #[arg(long)]
         expect: String,
     },
+    /// Call one function in a sandboxed CPU and print what it returns.
+    Emulate {
+        path: String,
+        #[arg(long)]
+        symbol: Option<String>,
+        #[arg(long)]
+        address: Option<String>,
+        #[arg(long)]
+        entry: bool,
+        /// Comma separated: `1,0x20,str:"hello, world"`.
+        #[arg(long, default_value = "", allow_hyphen_values = true)]
+        args: String,
+        #[arg(long, default_value_t = 2_000_000)]
+        max_insns: u64,
+        #[arg(long, default_value_t = 10_000)]
+        timeout_ms: u64,
+        /// Accept the emulated filesystem (default true).
+        #[arg(long)]
+        no_vfs: bool,
+        /// Read the return value from the FP register.
+        #[arg(long)]
+        as_double: bool,
+        /// Target is Thumb code (ARM only).
+        #[arg(long)]
+        thumb: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// List the functions `emulate` can call.
+    EmulateList {
+        path: String,
+        #[arg(long)]
+        filter: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Which external tools are installed.
     Doctor,
     /// Run the MCP server on stdin/stdout.
@@ -221,6 +257,38 @@ fn main() -> Result<()> {
             "patch",
             json!({"path": path, "offset": offset, "bytes": bytes, "expect": expect}),
         )?,
+        Command::Emulate {
+            path,
+            symbol,
+            address,
+            entry,
+            args,
+            max_insns,
+            timeout_ms,
+            no_vfs,
+            as_double,
+            thumb,
+            json,
+        } => render(
+            "emulate",
+            json!({
+                "path": path,
+                "symbol": symbol,
+                "address": address,
+                "entry": entry,
+                "args": args,
+                "max_insns": max_insns,
+                "timeout_ms": timeout_ms,
+                "vfs": !no_vfs,
+                "as_double": as_double,
+                "thumb": thumb,
+                "json": json,
+            }),
+        )?,
+        Command::EmulateList { path, filter, json } => {
+            print!("{}", rekit_core::emulate::list(&path, filter.as_deref(), json)?);
+            return Ok(());
+        }
         Command::Doctor => render("doctor", json!({}))?,
     };
 

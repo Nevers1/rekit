@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/rekit-core", "crates/rekit-mcp", "crates/rekit-cli"]
+members = ["crates/rekit-core", "crates/rekit-mcp", "crates/rekit-cli", "crates/rekit-emu"]
 
 [workspace.package]
 version = "0.1.0"

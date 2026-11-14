@@ -6,6 +6,7 @@
 
 pub mod antidebug;
 pub mod axml;
+pub mod emulate;
 pub mod entropy;
 pub mod external;
 pub mod hexdump;

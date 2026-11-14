@@ -255,6 +255,32 @@ pub fn tools() -> Value {
             }), &["path", "offset", "bytes", "expect"])
         },
         {
+            "name": "emulate",
+            "description": "Actually execute one function from a PE/ELF/Mach-O in a sandboxed CPU and report what it returns. This is the only tool that gives facts instead of guesses about obfuscated licence, password, integrity and anti-debug checks: ptrace returns 0, TracerPid is 0, no debugger is present, time advances, random bytes look real. Call `emulate_list` first when you do not know the function name. Arguments go in a string: numbers may be hex, strings are written str:\"text\" with quotes when they contain commas.",
+            "inputSchema": schema(json!({
+                "path": {"type": "string", "description": "file path; archive members must be extracted first, so pass a real file"},
+                "symbol": {"type": "string", "description": "exported function name"},
+                "address": {"type": "string", "description": "hex address to call instead of a name"},
+                "entry": {"type": "boolean", "description": "call the binary entry point"},
+                "args": {"type": "string", "description": "comma separated: 1,0x20,str:\"hello, world\""},
+                "max_insns": {"type": "integer", "description": "instruction budget, default 2000000"},
+                "timeout_ms": {"type": "integer", "description": "wall clock budget, default 10000"},
+                "vfs": {"type": "boolean", "description": "answer file reads with a fake /proc and /dev (default true); turn off to see what the code complains about"},
+                "as_double": {"type": "boolean", "description": "read the result from the floating point register"},
+                "thumb": {"type": "boolean", "description": "target is Thumb code (ARM only)"},
+                "json": {"type": "boolean", "description": "return the raw report instead of a summary"}
+            }), &["path"])
+        },
+        {
+            "name": "emulate_list",
+            "description": "Functions that `emulate` can call, with addresses and the detected architecture. Use this to pick a target.",
+            "inputSchema": schema(json!({
+                "path": {"type": "string"},
+                "filter": {"type": "string", "description": "substring of the name"},
+                "json": {"type": "boolean"}
+            }), &["path"])
+        },
+        {
             "name": "doctor",
             "description": "Which external tools are installed (r2, jadx, apktool, ilspycmd, binwalk, frida, vol) and their versions. Call this when a wrapper tool reports a missing dependency.",
             "inputSchema": schema(json!({}), &[])
@@ -354,6 +380,41 @@ pub fn call_tool(name: &str, args: &Value) -> Result<String> {
                 "patched {} at 0x{:x}: {} -> {} ({} bytes)\n",
                 res.path, res.offset, res.before, res.after, res.size
             ))
+        }
+        "emulate" => {
+            let path = core::emulate::prepare_path(&str_arg(args, "path")?)?;
+            let address = match args.get("address") {
+                None | Some(Value::Null) => None,
+                Some(v) => match v.as_u64().or_else(|| v.as_str().and_then(parse_number)) {
+                    Some(n) => Some(n),
+                    None => bail!("address must be a number or a hex string"),
+                },
+            };
+            let req = core::emulate::Request {
+                path,
+                symbol: opt_str(args, "symbol"),
+                address,
+                entry: args.get("entry").and_then(Value::as_bool).unwrap_or(false),
+                args: opt_str(args, "args").unwrap_or_default(),
+                max_insns: num_arg(args, "max_insns", 2_000_000),
+                timeout_ms: num_arg(args, "timeout_ms", 10_000),
+                vfs: args.get("vfs").and_then(Value::as_bool).unwrap_or(true),
+                as_double: args
+                    .get("as_double")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                thumb: args.get("thumb").and_then(Value::as_bool).unwrap_or(false),
+                json: args.get("json").and_then(Value::as_bool).unwrap_or(false),
+            };
+            core::emulate::run_request(&req)
+        }
+        "emulate_list" => {
+            let path = core::emulate::prepare_path(&str_arg(args, "path")?)?;
+            core::emulate::list(
+                &path,
+                opt_str(args, "filter").as_deref(),
+                args.get("json").and_then(Value::as_bool).unwrap_or(false),
+            )
         }
         "doctor" => render_doctor(),
         other => bail!("unknown tool {other:?}"),
@@ -572,6 +633,10 @@ fn render_doctor() -> Result<String> {
             tool.name, tool.purpose, version
         ));
     }
+    match core::emulate::available() {
+        Some(path) => out.push_str(&format!("  ok  {:<14} {:<44} {}\n", "rekit-emu", "execute a function in a sandboxed CPU", path.display())),
+        None => out.push_str("  --- rekit-emu       execute a function in a sandboxed CPU\n"),
+    }
     if !missing.is_empty() {
         out.push_str(&format!("missing: {}\n", missing.join(", ")));
     }
@@ -607,7 +672,7 @@ mod tests {
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted.len(), names.len());
-        assert_eq!(names.len(), 17);
+        assert_eq!(names.len(), 19);
     }
 
     #[test]
