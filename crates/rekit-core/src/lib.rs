@@ -21,6 +21,7 @@ pub mod hook;
 pub mod ida;
 pub mod info;
 pub mod javap;
+pub mod memdump;
 pub mod patch;
 pub mod resolve;
 pub mod resources;

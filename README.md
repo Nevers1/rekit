@@ -101,9 +101,9 @@ opencode mcp add rekit --global -- rekit mcp
 The tools are `info`, `strings`, `grep`, `hex`, `entropy`, `imports`, `exports`,
 `antidebug`, `scan`, `archive`, `manifest`, `apktool`, `resources`, `decompile`,
 `javap`, `dotnet`, `ghidra`, `ida`, `disasm`, `r2`, `asm`, `diff`, `patch`,
-`binwalk`, `emulate`, `emulate_list`, `fuzz`, `hook`, `endpoints`, `secrets`,
-`jwt`, `http` and `doctor`; clients prefix them with the server name, so the
-agent sees `rekit_info`.
+`binwalk`, `emulate`, `emulate_list`, `fuzz`, `hook`, `memdump`, `endpoints`,
+`secrets`, `jwt`, `http` and `doctor`; clients prefix them with the server name,
+so the agent sees `rekit_info`.
 
 The server also ships usage instructions in the `initialize` response, so the
 model learns `path::inner` and the `grep` pattern syntax without you writing a
@@ -141,6 +141,7 @@ paragraph in the system prompt.
 | `emulate` | Run one function in a sandboxed CPU and get the real return value — through the anti-debug checks. |
 | `fuzz` | The same call over a range of inputs: where the return changes, which input is the key, which one crashes. |
 | `hook` | A Frida script that logs a function's real arguments and return value; optionally runs the process. |
+| `memdump` | What a RAM image holds, through volatility3: processes, sockets, command lines, files, hives, shell history. |
 | `endpoints` | What a frontend bundle talks to: URLs, API routes, query parameters, GraphQL operations, with file and line. |
 | `secrets` | Keys and tokens committed by accident, by shape and by entropy. Masked unless `reveal` is set. |
 | `jwt` | What a token claims, whether its signature is checked, and whether an HS secret falls to a wordlist. |
@@ -170,6 +171,7 @@ rekit emulate libnative.so --symbol check_license --args 'str:"AAAA-BBBB"'
 rekit emulate-list libnative.so --filter check
 rekit fuzz libnative.so --symbol check_license --mode magic --start 0 --end 65535 --target 1
 rekit hook libnative.so --symbol check_license --mode spawn --spawn ./app
+rekit memdump mem.raw --plugin windows.pslist --args "--pid 1234"
 rekit ghidra libnative.so --symbol JNI_OnLoad
 rekit ida libnative.so --symbol JNI_OnLoad
 rekit dotnet tool.dll --type Demo.Checker
@@ -483,6 +485,74 @@ redirect target named when there was one.
 These four are English like the rest of the output; the old plugin's Russian
 wording was translated so the reports read consistently.
 
+## Memory dumps
+
+A disk image and a RAM image answer different questions: the disk says what was
+installed, the RAM says what was running, what it was connected to, and what
+was typed. `memdump` drives [volatility3](https://github.com/volatilityfoundation/volatility3)
+over an image, so those questions are one call each.
+
+volatility3 is a Python package, and its `vol` command is the part that breaks:
+a pipx shim carries an absolute shebang, and when the venv moves the shim
+survives and still fails, which looks exactly like "installed". So the
+interpreter is found by asking it to `import volatility3` — `$REKIT_VOL_PYTHON`,
+then the pipx and uv venvs, then `python3` — and the package is entered through
+`volatility3.cli.main`, because it ships no usable `__main__`.
+
+```console
+$ rekit memdump mem.raw
+dump: mem.raw
+plugins: 181
+
+  windows.amcache.Amcache               Extract information on executed applications from the AmCache (deprecated).
+  windows.bigpools.BigPools             List big page pools.
+  windows.callbacks.Callbacks           Lists kernel callbacks and notification routines.
+  ...
+
+common plugins:
+  windows.info                          which build this dump is from
+  windows.pslist                        processes
+  windows.pstree                        process tree
+  windows.netscan                       sockets and connections
+  windows.cmdline                       command lines of running processes
+  windows.filescan                      file objects in memory
+  windows.registry.hivelist             registry hives
+  linux.pslist                          processes
+  linux.bash                            shell history
+  linux.netscan                         sockets and connections
+
+pass plugin=windows.pslist (and args="--pid 1234") to run one; the short form of a name is enough
+```
+
+The plugin list is the one thing volatility prints only inside its `--help`
+text, so it is parsed from there: descriptions that wrap are joined back, and
+the OS plugins are moved above the framework's own. `filter` narrows it by
+regex when you know roughly what you want.
+
+```console
+$ rekit memdump mem.raw --plugin windows.pslist --args "--pid 1234"
+volatility3 windows.pslist — mem.raw
+Volatility 3 Framework 2.28.0
+PID    PPID   ImageFileName   Offset(V) ...
+```
+
+Analysis runs with `--offline`: symbol tables are normally fetched over the
+network when one is missing, and a download that takes minutes is
+indistinguishable from a hang from the caller's side. Symbols have to be
+present already (`-s`, or a `symbols/` directory next to the dump). An image
+volatility cannot identify — a truncated dump, or a random file — answers with
+its own requirement text rather than a guess, which is the honest result:
+
+```
+Unsatisfied requirement plugins.PsList.kernel.layer_name:
+A translation layer requirement was not fulfilled.  Please verify that:
+        A file was provided to create this layer (by -f, --single-location or by config)
+        The file is a valid memory image and was acquired cleanly
+```
+
+A dump can come out of an archive like any other path, so
+`evidence.zip::mem.raw` works, and the header says where it came from.
+
 ## What it does not do yet
 
 Honest scope for `0.1`.
@@ -490,10 +560,10 @@ Honest scope for `0.1`.
 - **Formats are parsed in Rust**: ELF, PE, Mach-O, zip, tar.gz, gz, Android
   binary XML, plus magic-byte detection for DEX, JAR, APK, wasm, PDF, SQLite and
   Android boot images. Nothing is executed and no external tool is needed.
-- **Disassembly, decompilation, carving, hooks and HTTP are wrappers** around
-  `llvm-objdump`, `r2`, `jadx`, `apktool`, `binwalk`, Ghidra, IDA, `ilspycmd`,
-  `javap`, `frida` and `curl`. `doctor` reports what is missing instead of
-  failing later.
+- **Disassembly, decompilation, carving, hooks, HTTP and memory are wrappers**
+  around `llvm-objdump`, `r2`, `jadx`, `apktool`, `binwalk`, Ghidra, IDA,
+  `ilspycmd`, `javap`, `frida`, `curl` and volatility3. `doctor` reports what is
+  missing instead of failing later.
 - `endpoints`, `secrets` and `jwt` are pure Rust: no external tool, no network.
   Only `http` leaves the machine, and only to the URL it was given.
 - DEX, JVM and .NET get format detection and offsets, not structure: use
@@ -510,6 +580,9 @@ Honest scope for `0.1`.
   a bundle, not whether it exists, and `secrets` reports a key by its shape — a
   high-entropy string that is really a hash, or a live key that matches no
   known shape, can still be wrong.
+- `memdump` needs volatility3 and the symbol table for the image's kernel. It
+  is a wrapper, not a parser: an image volatility cannot identify gets its
+  requirement text back, and no attempt is made to guess a profile.
 
 Next on the list: program-level emulation, so a binary can be run until a
 specific branch instead of only one function at a time.

@@ -408,6 +408,26 @@ enum Command {
         #[arg(long)]
         body_only: bool,
     },
+    /// Analyze a memory dump through volatility3.
+    Memdump {
+        /// The dump (raw, vmem, dmp, core, lmp, lime), or archive::inner.
+        path: String,
+        /// volatility3 plugin, e.g. windows.pslist.
+        #[arg(long)]
+        plugin: Option<String>,
+        /// Extra plugin arguments, e.g. "--pid 1234".
+        #[arg(long, allow_hyphen_values = true)]
+        args: Option<String>,
+        /// List the available plugins and stop.
+        #[arg(long)]
+        list: bool,
+        /// Only list plugins matching this regex.
+        #[arg(long)]
+        filter: Option<String>,
+        /// Max lines of output.
+        #[arg(long, default_value_t = 120)]
+        limit: usize,
+    },
     /// Which external tools are installed.
     Doctor,
     /// Run the MCP server on stdin/stdout.
@@ -777,6 +797,24 @@ fn main() -> Result<()> {
                 }),
             )?
         }
+        Command::Memdump {
+            path,
+            plugin,
+            args,
+            list,
+            filter,
+            limit,
+        } => render(
+            "memdump",
+            json!({
+                "path": path,
+                "plugin": plugin,
+                "args": args,
+                "list": list,
+                "filter": filter,
+                "limit": limit,
+            }),
+        )?,
         Command::Doctor => render("doctor", json!({}))?,
     };
 

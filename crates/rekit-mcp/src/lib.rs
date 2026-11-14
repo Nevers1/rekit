@@ -457,6 +457,18 @@ pub fn tools() -> Value {
             }), &["url"])
         },
         {
+            "name": "memdump",
+            "description": "Analyze a memory dump through volatility3: processes, sockets, command lines, open files, registry hives, shell history. Plugins are named as volatility names them (windows.pslist, windows.netscan, linux.bash). With no plugin it lists what this dump supports. A dump can come from an archive::inner spec like any other path.",
+            "inputSchema": schema(json!({
+                "path": {"type": "string", "description": "the dump: raw, vmem, dmp, core, lmp or lime"},
+                "plugin": {"type": "string", "description": "volatility3 plugin, e.g. windows.pslist"},
+                "args": {"type": "string", "description": "extra plugin arguments, e.g. \"--pid 1234\""},
+                "list": {"type": "boolean", "description": "list available plugins"},
+                "filter": {"type": "string", "description": "regex for the plugin list"},
+                "limit": {"type": "integer", "description": "max lines of output, default 120"}
+            }), &["path"])
+        },
+        {
             "name": "doctor",
             "description": "Which external tools are installed (r2, jadx, apktool, ilspycmd, binwalk, frida, vol) and their versions. Call this when a wrapper tool reports a missing dependency.",
             "inputSchema": schema(json!({}), &[])
@@ -803,6 +815,17 @@ pub fn call_tool(name: &str, args: &Value) -> Result<String> {
             };
             web::http::run(&req)
         }
+        "memdump" => {
+            let req = core::memdump::Request {
+                path: str_arg(args, "path")?,
+                plugin: opt_str(args, "plugin"),
+                args: opt_str(args, "args"),
+                list: args.get("list").and_then(Value::as_bool).unwrap_or(false),
+                filter: opt_str(args, "filter"),
+                limit: num_arg(args, "limit", 120) as usize,
+            };
+            core::memdump::run(&req)
+        }
         "doctor" => render_doctor(),
         other => bail!("unknown tool {other:?}"),
     }
@@ -1062,7 +1085,7 @@ mod tests {
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted.len(), names.len());
-        assert_eq!(names.len(), 33);
+        assert_eq!(names.len(), 34);
     }
 
     #[test]

@@ -172,3 +172,34 @@ tried 3 of 4 in 0.0s
 
 `tried 3 of 4` is the check that the crack path really iterates: the fourth word
 is never needed.
+
+## Memory dumps
+
+No dump ships here: a real image is gigabytes and belongs to whoever captured
+it. The wrapper is checked against an image volatility cannot identify, which
+is the honest case — it must answer with requirements, not a crash.
+
+```console
+$ head -c 1M /dev/urandom > /tmp/fake.raw
+$ rekit memdump /tmp/fake.raw --list --limit 5
+dump: fake.raw
+plugins: 181
+  windows.amcache.Amcache               Extract information on executed applications from the AmCache (deprecated).
+  ...
+
+$ rekit memdump /tmp/fake.raw --plugin linux.pslist
+volatility3 linux.pslist — fake.raw
+Volatility 3 Framework 2.28.0
+Unsatisfied requirement plugins.PsList.kernel.layer_name:
+...
+A translation layer requirement was not fulfilled.
+```
+
+The plugin list proves the interpreter and `volatility3.cli.main` entry path
+work; the requirement text proves `-f` reached volatility, since otherwise it
+complains about a missing file rather than an unidentifiable one.
+
+`REKIT_VOL_PYTHON` overrides the interpreter. Without it, the venv that pipx
+created is found by asking it to `import volatility3`, not by trusting the
+`vol` shim on `$PATH` — a moved venv leaves that shim in place, broken, and
+looking installed.
