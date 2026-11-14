@@ -530,6 +530,9 @@ enum Command {
         output: Option<String>,
         #[arg(long, default_value_t = 30_000)]
         timeout_ms: u64,
+        /// Only rows containing this text (requests, console, links).
+        #[arg(long)]
+        filter: Option<String>,
         /// Extra header for every request: "Name: value"; repeatable.
         #[arg(long = "header", value_name = "NAME: VALUE")]
         headers: Vec<String>,
@@ -1059,6 +1062,7 @@ fn main() -> Result<()> {
             full_page,
             output,
             timeout_ms,
+            filter,
             headers,
             cookies,
             user_agent,
@@ -1081,6 +1085,7 @@ fn main() -> Result<()> {
                 "full_page": full_page,
                 "output": output,
                 "timeout_ms": timeout_ms,
+                "filter": filter,
                 "headers": headers,
                 "cookies": cookies,
                 "user_agent": user_agent,

@@ -693,8 +693,10 @@ Every action is one call: `text`, `dom`/`html`, `title`, `eval` (run JS),
 `requests`, `console`, `cookies`, `set-cookie`, `links`, `storage`, `screenshot`,
 `pdf`, `click`, `fill`, `wait`, `snapshot`. `snapshot` is the summary — title,
 text, screenshot and the first requests — and is usually the one to start with.
-`click` and `fill` take a `--js` that runs *after* the interaction, so the answer
-to "what changed" is in the same call:
+`--filter login` narrows `requests`, `console` and `links` to rows containing
+that text (case-insensitive), which is how a page with forty scripts stays
+readable. `click` and `fill` take a `--js` that runs *after* the interaction, so
+the answer to "what changed" is in the same call:
 
 ```console
 $ rekit browser https://app.example.com --action click --selector '#login' --js 'location.pathname'

@@ -46,6 +46,10 @@ pub struct Request {
     /// Where to write a screenshot or pdf; a cache path when omitted.
     pub output: Option<String>,
     pub timeout_ms: u64,
+    /// Only rows whose text contains this, for `requests`, `console` and
+    /// `links`. Case-insensitive: a page makes hundreds of requests and the
+    /// interesting one is usually found by a fragment of its URL.
+    pub filter: Option<String>,
     /// Extra headers for every request the page makes.
     pub headers: Vec<String>,
     /// Cookies to set before loading, `name=value; domain=…; path=…`.
@@ -74,6 +78,7 @@ impl Default for Request {
             full_page: false,
             output: None,
             timeout_ms: DEFAULT_TIMEOUT_MS,
+            filter: None,
             headers: Vec::new(),
             cookies: Vec::new(),
             user_agent: None,
@@ -229,11 +234,11 @@ pub fn run(req: &Request) -> Result<String> {
         }
         "requests" => {
             chrome.pump(NETWORK_SETTLE);
-            json!({"requests": request_rows(&chrome)})
+            json!({"requests": keep_matching(request_rows(&chrome), req)})
         }
         "console" => {
             chrome.pump(NETWORK_SETTLE);
-            json!({"console": console_rows(&chrome)})
+            json!({"console": keep_matching(console_rows(&chrome), req)})
         }
         "links" => {
             let links = chrome.evaluate(
@@ -244,7 +249,7 @@ pub fn run(req: &Request) -> Result<String> {
                 Some(text) => serde_json::from_str(text).unwrap_or(json!([])),
                 None => links.clone(),
             };
-            json!({"links": parsed})
+            json!({"links": keep_matching(parsed, req)})
         }
         "storage" => {
             let data = chrome.evaluate(
@@ -456,6 +461,31 @@ fn render_requests(rows: Option<&Value>) -> String {
         out.push_str(&format!("... {} more\n", rows.len() - ROW_LIMIT));
     }
     out
+}
+
+/// Drop rows the caller did not ask for.
+///
+/// The page is the source of the noise here — forty scripts and an analytics
+/// beacon per load — so the filter matches the whole row as JSON, which means
+/// `--filter login` finds a URL, a console message and a link alike.
+fn keep_matching(rows: Value, req: &Request) -> Value {
+    let Some(needle) = req
+        .filter
+        .as_deref()
+        .map(str::trim)
+        .filter(|needle| !needle.is_empty())
+        .map(str::to_ascii_lowercase)
+    else {
+        return rows;
+    };
+    let matches = |row: &Value| match row {
+        Value::String(text) => text.to_ascii_lowercase().contains(&needle),
+        other => other.to_string().to_ascii_lowercase().contains(&needle),
+    };
+    match rows {
+        Value::Array(rows) => Value::Array(rows.into_iter().filter(matches).collect()),
+        other => other,
+    }
 }
 
 fn request_rows(chrome: &Chrome) -> Value {
@@ -845,6 +875,23 @@ mod tests {
         assert_eq!(human_size(512), "512 B");
         assert_eq!(human_size(2048), "2.0 kB");
         assert_eq!(human_size(3 * 1024 * 1024), "3.0 MB");
+    }
+
+    #[test]
+    fn a_filter_keeps_only_the_rows_it_matches() {
+        let rows = json!([
+            {"url": "https://app.example.com/api/login"},
+            {"url": "https://cdn.example.com/app.js"}
+        ]);
+        let req = Request {
+            filter: Some("LOGIN".to_string()),
+            ..Request::default()
+        };
+        let kept = keep_matching(rows, &req);
+        assert_eq!(kept.as_array().unwrap().len(), 1);
+        // No filter, or a blank one, changes nothing.
+        let all = keep_matching(json!(["a", "b"]), &Request::default());
+        assert_eq!(all.as_array().unwrap().len(), 2);
     }
 
     #[test]
