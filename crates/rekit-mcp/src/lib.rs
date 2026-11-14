@@ -280,6 +280,24 @@ pub fn tools() -> Value {
             }), &["path"])
         },
         {
+            "name": "apktool",
+            "description": "Decode an APK into smali, resources and a readable AndroidManifest with apktool. `pattern` searches the decoded tree (file:line:text) and the cache path can be handed to `grep`. The decode is cached per APK, so only the first call is slow.",
+            "inputSchema": schema(json!({
+                "path": {"type": "string", "description": "path to .apk"},
+                "pattern": {"type": "string", "description": "text to search in the decoded apk"},
+                "limit": {"type": "integer", "description": "max matches, default 60"}
+            }), &["path"])
+        },
+        {
+            "name": "resources",
+            "description": "What is inside an APK's zip: resource groups and counts, layouts, drawables, assets, XML. `kind` picks a group and `name` filters it; naming one XML returns it decoded. Cheaper than a full apktool decode.",
+            "inputSchema": schema(json!({
+                "path": {"type": "string", "description": ".apk"},
+                "kind": {"type": "string", "enum": ["list", "strings", "layout", "drawable", "asset", "xml"], "description": "default list"},
+                "name": {"type": "string", "description": "resource name filter, e.g. app_name or activity_main"}
+            }), &["path"])
+        },
+        {
             "name": "binwalk",
             "description": "Map embedded files and firmware signatures (binwalk). extract=true unwraps them into the rekit cache.",
             "inputSchema": schema(json!({
@@ -461,6 +479,18 @@ pub fn call_tool(name: &str, args: &Value) -> Result<String> {
             let code = args.get("code").and_then(Value::as_bool).unwrap_or(true);
             let limit = (num_arg(args, "limit", 200) as usize).clamp(1, 20_000);
             core::javap::decompile(&path, class.as_deref(), method.as_deref(), code, limit)
+        }
+        "apktool" => {
+            let path = str_arg(args, "path")?;
+            let pattern = opt_str(args, "pattern");
+            let limit = (num_arg(args, "limit", 60) as usize).clamp(1, 5_000);
+            core::apktool::decode(&path, pattern.as_deref(), limit)
+        }
+        "resources" => {
+            let path = str_arg(args, "path")?;
+            let kind = opt_str(args, "kind").unwrap_or_else(|| "list".to_string());
+            let name = opt_str(args, "name");
+            core::resources::list(&path, &kind, name.as_deref())
         }
         "manifest" => core::axml::render(&str_arg(args, "path")?),
         "binwalk" => {
@@ -848,7 +878,7 @@ mod tests {
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted.len(), names.len());
-        assert_eq!(names.len(), 25);
+        assert_eq!(names.len(), 27);
     }
 
     #[test]

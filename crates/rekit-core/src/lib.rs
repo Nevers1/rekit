@@ -5,6 +5,7 @@
 //! case. Parsing failures degrade to magic-byte detection instead of errors.
 
 pub mod antidebug;
+pub mod apktool;
 pub mod asm;
 pub mod axml;
 pub mod decompilers;
@@ -20,6 +21,7 @@ pub mod info;
 pub mod javap;
 pub mod patch;
 pub mod resolve;
+pub mod resources;
 pub mod scan;
 pub mod strings;
 pub mod symbols;

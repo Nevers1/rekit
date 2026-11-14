@@ -111,6 +111,25 @@ enum Command {
         #[arg(long, default_value_t = 100)]
         limit: usize,
     },
+    /// Decode an APK into smali and resources with apktool.
+    Apktool {
+        path: String,
+        /// Text to search in the decoded tree.
+        #[arg(long)]
+        pattern: Option<String>,
+        #[arg(long, default_value_t = 60)]
+        limit: usize,
+    },
+    /// What an APK contains: resource groups, layouts, assets.
+    Resources {
+        path: String,
+        /// list | strings | layout | drawable | asset | xml
+        #[arg(long, default_value = "list")]
+        kind: String,
+        /// Resource name filter, e.g. app_name.
+        #[arg(long)]
+        name: Option<String>,
+    },
     /// Decode an Android binary manifest.
     Manifest { path: String },
     /// Decompile native code to C with Ghidra.
@@ -325,6 +344,18 @@ fn main() -> Result<()> {
         Command::Decompile { path, class, limit } => render(
             "decompile",
             json!({"path": path, "class": class, "limit": limit}),
+        )?,
+        Command::Apktool {
+            path,
+            pattern,
+            limit,
+        } => render(
+            "apktool",
+            json!({"path": path, "pattern": pattern, "limit": limit}),
+        )?,
+        Command::Resources { path, kind, name } => render(
+            "resources",
+            json!({"path": path, "kind": kind, "name": name}),
         )?,
         Command::Manifest { path } => render("manifest", json!({"path": path}))?,
         Command::Ghidra {
