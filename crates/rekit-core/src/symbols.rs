@@ -198,14 +198,45 @@ pub fn import_names(spec: &str) -> Result<Vec<String>> {
 mod tests {
     use super::*;
 
+    /// The test binary itself is a real dynamically linked ELF, so this needs
+    /// no system path and holds on every distro.
     #[test]
-    fn libc_is_resolvable_on_linux() {
-        let names = match import_names("/lib/x86_64-linux-gnu/libc.so.6") {
-            Ok(n) => n,
-            Err(_) => return, // fixture absent on this distro
-        };
-        assert!(names
-            .iter()
-            .any(|n| n.starts_with("strlen") || n.contains("malloc")));
+    fn imports_of_this_test_binary_resolve() {
+        let exe = std::env::current_exe().unwrap();
+        let names = import_names(&exe.display().to_string()).unwrap();
+        assert!(!names.is_empty(), "a linked binary imports something");
+        assert!(
+            names.iter().any(|n| n.starts_with("malloc")
+                || n.starts_with("free")
+                || n.starts_with("memcpy")
+                || n.starts_with("strlen")),
+            "expected a libc allocator or string import, got {names:?}"
+        );
+    }
+
+    /// `imports` on libc itself only returns `_dl_*` and tunables — `strlen`
+    /// lives in the exports. Distros that keep libc elsewhere are skipped.
+    #[test]
+    fn libc_exports_are_resolvable() {
+        for candidate in [
+            "/lib/x86_64-linux-gnu/libc.so.6",
+            "/usr/lib/libc.so.6",
+            "/lib/libc.so.6",
+            "/lib64/libc.so.6",
+        ] {
+            let Ok(list) = exports(candidate, 20_000) else {
+                continue;
+            };
+            let names: Vec<&str> = list.iter().map(|s| s.name.as_str()).collect();
+            assert!(
+                names.iter().any(|n| n.starts_with("strlen")),
+                "{candidate} does not export strlen"
+            );
+            assert!(
+                names.iter().any(|n| n.contains("malloc")),
+                "{candidate} does not export malloc"
+            );
+            return;
+        }
     }
 }
