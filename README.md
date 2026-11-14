@@ -115,18 +115,18 @@ paragraph in the system prompt.
 | --- | --- |
 | `info` | What format, arch, bitness, entry point, sections, entropy per section? What next? |
 | `strings` | What printable text is in here (ASCII and UTF-16LE), at which offsets? |
-| `grep` | Where are these bytes? Hex, `"quoted text"` or a word. |
-| `hex` | Hex dump of a range, to verify bytes before patching. |
+| `grep` | Where are these bytes (hex, `"quoted text"`, a word) — or, in `mode=text`, which line says this: line numbers, regex, case folding, context. |
+| `hex` | Hex dump of a range, to verify bytes before patching. With `bytes` it finds a signature and dumps the first hit. |
 | `entropy` | Is it packed? Which protector? Any RWX or high-entropy code? |
-| `imports` | What can it do — imported symbols with their library. |
-| `exports` | What does it offer — exported symbols with addresses. |
+| `imports` | What can it do — imported symbols with their library, filterable by name. |
+| `exports` | What does it offer — exported symbols with addresses, filterable. An archive is answered with its entry list. |
 | `antidebug` | Is it fighting analysis? Scored verdict, not a wall of matches. |
 | `scan` | Crypto constants (AES S-box, SHA-256 K, ChaCha sigma) and imports grouped into anti/crypto/net/mem/priv. |
 | `archive` | What is inside this APK/JAR/zip/tar.gz, so I can pick a `path::inner`. |
 | `manifest` | The decoded `AndroidManifest.xml` of an APK: package, version, permissions, exported components. No apktool, no unpacking. |
 | `apktool` | The whole package decoded: readable manifest, `res/values`, layouts, smali. Cached, and searchable by `pattern`. |
 | `resources` | What an APK's zip holds — resource groups, layouts, drawables, assets — and one named XML decoded in place. |
-| `decompile` | jadx to Java, cached. Lists classes, or returns one class source by name. |
+| `decompile` | jadx to Java, cached. Lists classes, returns one class source by name, or searches the whole tree by `pattern` in one call. |
 | `javap` | JVM bytecode with the constant pool, for a `.class` or a class inside a jar. |
 | `dotnet` | A .NET assembly to exact C# through `ilspycmd`: list types, or decompile one. |
 | `ghidra` | Native code to C through Ghidra headless, analysed once and reopened from its project. |
@@ -136,7 +136,7 @@ paragraph in the system prompt.
 | `asm` | Assemble instructions to bytes, or write them in after `expect` matches. |
 | `diff` | What changed between two versions: functions added, removed, modified. |
 | `patch` | Write bytes at an offset, but only after `expect` matches what is already there. Keeps a copy of the file in the cache first, then asks rabin2 whether it still parses. |
-| `binwalk` | Embedded files and firmware signatures, optionally carved out. |
+| `binwalk` | Embedded files and firmware signatures, optionally narrowed by `signatures` and carved out. |
 | `emulate_list` | Which functions can be called, with addresses and architecture. |
 | `emulate` | Run one function in a sandboxed CPU and get the real return value — through the anti-debug checks, with a JNIEnv when it is a native method, or in a real QEMU process when Unicorn cannot execute the code. |
 | `fuzz` | The same call over a range of inputs: where the return changes, which input is the key, which one crashes. |
@@ -157,12 +157,15 @@ rekit info app.apk::lib/arm64-v8a/libnative.so
 rekit archive app.apk
 rekit strings libnative.so --min 6 --filter http --limit 50
 rekit grep libnative.so -- 'de ad be ef'
+rekit grep app.apk::res/values/strings.xml 'https://' --mode text --context 1
+rekit grep smali 'invoke.*getDeviceId' --mode text --regex
 rekit hex libnative.so --offset 0x2a8 --length 64
 rekit antidebug libnative.so
 rekit scan libnative.so --kind apis
 rekit imports libnative.so --limit 20
 rekit manifest app.apk::AndroidManifest.xml
 rekit decompile app.apk --class com.example.MainActivity
+rekit decompile app.apk --pattern "getDeviceId" --limit 20
 rekit disasm libnative.so --symbol JNI_OnLoad
 rekit r2 libnative.so --kind pdc --target entry0
 rekit patch libnative.so --offset 0x2a8 --bytes "90 90" --expect "f3 0f"

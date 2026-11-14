@@ -149,28 +149,34 @@ pub fn tools() -> Value {
         },
         {
             "name": "grep",
-            "description": "Search raw bytes. Pattern is hex (`de ad be ef`, `deadbeef`), a quoted literal (`\"BuildConfig\"`), or a plain word. Returns offsets with ASCII context.",
+            "description": "Search a file two ways. mode=bytes (default) answers \"where are these bytes\": hex (`de ad be ef`), a quoted literal (`\"BuildConfig\"`) or a plain word, with offsets and ASCII context — right for binaries. mode=text answers \"which line says this\": line numbers with surrounding lines, regex and case folding — right for jadx output, smali, JS and strings dumps.",
             "inputSchema": schema(json!({
                 "path": {"type": "string"},
                 "pattern": {"type": "string"},
+                "mode": {"type": "string", "enum": ["bytes", "text"], "description": "default bytes"},
+                "regex": {"type": "boolean", "description": "mode=text: treat the pattern as a regex"},
+                "ignore_case": {"type": "boolean", "description": "ignore case, both modes"},
                 "limit": {"type": "integer", "description": "default 50"},
-                "context": {"type": "integer", "description": "bytes around each hit, default 16"}
+                "context": {"type": "integer", "description": "bytes around each hit (bytes mode) or lines around it (text mode), default 16 / 2"}
             }), &["path", "pattern"])
         },
         {
             "name": "hex",
-            "description": "Hex dump of a byte range with ASCII column, like xxd. Use it to verify bytes before patching.",
+            "description": "Hex dump of a byte range with ASCII column, like xxd. Use it to verify bytes before patching. With `bytes` it instead hunts that signature, lists the offsets and dumps the first hit.",
             "inputSchema": schema(json!({
                 "path": {"type": "string"},
                 "offset": {"type": "integer", "description": "decimal or 0x-prefixed, default 0"},
-                "length": {"type": "integer", "description": "default 256, max 8192"}
+                "length": {"type": "integer", "description": "default 256, max 8192"},
+                "bytes": {"type": "string", "description": "signature to look for instead, hex '4d5a9000' or \"MZ\""},
+                "limit": {"type": "integer", "description": "with bytes: how many offsets to list, default 50"}
             }), &["path"])
         },
         {
             "name": "entropy",
             "description": "Shannon entropy per section plus packer fingerprints (UPX, VMProtect, Themida, Enigma, ASPack, MPRESS, ConfuserEx, .NET Reactor) and layout anomalies such as RWX sections or executable high-entropy code.",
             "inputSchema": schema(json!({
-                "path": {"type": "string"}
+                "path": {"type": "string"},
+                "limit": {"type": "integer", "description": "how many sections to print, default 20"}
             }), &["path"])
         },
         {
@@ -178,14 +184,16 @@ pub fn tools() -> Value {
             "description": "Imported symbols with the library they come from. The quickest way to see what a binary can actually do.",
             "inputSchema": schema(json!({
                 "path": {"type": "string"},
+                "filter": {"type": "string", "description": "case-insensitive substring of the name, applied before the limit"},
                 "limit": {"type": "integer", "description": "default 200"}
             }), &["path"])
         },
         {
             "name": "exports",
-            "description": "Exported symbols with addresses, for shared libraries and DLLs.",
+            "description": "Exported symbols with addresses, for shared libraries and DLLs. An archive is answered with its entry list instead, so an APK does not come back as \"not a binary\".",
             "inputSchema": schema(json!({
                 "path": {"type": "string"},
+                "filter": {"type": "string", "description": "case-insensitive substring of the name, applied before the limit"},
                 "limit": {"type": "integer", "description": "default 200"}
             }), &["path"])
         },
@@ -193,7 +201,8 @@ pub fn tools() -> Value {
             "name": "antidebug",
             "description": "Static anti-debug and anti-tamper signals: suspicious imports (ptrace, IsDebuggerPresent, NtQueryInformationProcess, __system_property_get) and strings (TracerPid, frida, xposed, magisk, goldfish), with a score and verdict.",
             "inputSchema": schema(json!({
-                "path": {"type": "string"}
+                "path": {"type": "string"},
+                "limit": {"type": "integer", "description": "how many findings per group, default 60"}
             }), &["path"])
         },
         {
@@ -233,11 +242,14 @@ pub fn tools() -> Value {
         },
         {
             "name": "decompile",
-            "description": "Decompile a dex/apk to Java with jadx (cached). Without `class` it lists the generated files; with `class` it returns that file's source.",
+            "description": "Decompile a dex/apk to Java with jadx (cached). Without `class` or `pattern` it lists the generated files; with `class` it returns that file's source; with `pattern` it searches the whole decompiled tree by line — one call instead of decompile-then-grep.",
             "inputSchema": schema(json!({
                 "path": {"type": "string", "description": "apk, dex, jar or a path::inner spec"},
                 "class": {"type": "string", "description": "fully qualified class name, e.g. com.example.Foo"},
-                "limit": {"type": "integer", "description": "files to list, default 100"}
+                "pattern": {"type": "string", "description": "search the decompiled tree for this"},
+                "regex": {"type": "boolean", "description": "treat pattern as a regex"},
+                "ignore_case": {"type": "boolean"},
+                "limit": {"type": "integer", "description": "files to list, or matches to report; default 100"}
             }), &["path"])
         },
         {
@@ -310,10 +322,12 @@ pub fn tools() -> Value {
         },
         {
             "name": "binwalk",
-            "description": "Map embedded files and firmware signatures (binwalk). extract=true unwraps them into the rekit cache.",
+            "description": "Map embedded files and firmware signatures (binwalk). extract=true unwraps them into the rekit cache and lists what came out; signatures narrows the scan to the types you care about.",
             "inputSchema": schema(json!({
                 "path": {"type": "string"},
-                "extract": {"type": "boolean", "description": "default false"}
+                "extract": {"type": "boolean", "description": "default false"},
+                "signatures": {"type": "string", "description": "comma separated file types to look for only, e.g. 'png,zip,exe'"},
+                "limit": {"type": "integer", "description": "how many rows of the map to print, default 120"}
             }), &["path"])
         },
         {
@@ -499,27 +513,101 @@ pub fn call_tool(name: &str, args: &Value) -> Result<String> {
             let path = str_arg(args, "path")?;
             let pattern = str_arg(args, "pattern")?;
             let limit = num_arg(args, "limit", 50) as usize;
-            let context = num_arg(args, "context", 16) as usize;
-            render_grep(&path, &pattern, limit, context)
+            let regex = args.get("regex").and_then(Value::as_bool).unwrap_or(false);
+            let ignore_case = args
+                .get("ignore_case")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let mode = match opt_str(args, "mode") {
+                Some(mode) if mode == "bytes" && regex => bail!(
+                    "regex only works in mode=text: bytes are bytes, and a regex over them \
+                     is a different tool"
+                ),
+                Some(mode) => mode,
+                // A regex only makes sense line by line; asking for one is an
+                // unambiguous request for text mode.
+                None if regex => "text".to_string(),
+                None => "bytes".to_string(),
+            };
+            if mode == "text" {
+                let context = match args.get("context") {
+                    Some(Value::Null) | None => 2,
+                    Some(v) => v.as_u64().unwrap_or(2) as usize,
+                };
+                let opts = core::search::Options {
+                    regex,
+                    ignore_case,
+                    context,
+                    limit,
+                };
+                core::search::text(&path, &pattern, &opts)
+            } else {
+                let context = match args.get("context") {
+                    Some(Value::Null) | None => 16,
+                    Some(v) => v.as_u64().unwrap_or(16) as usize,
+                };
+                render_grep(&path, &pattern, limit, context, ignore_case)
+            }
         }
         "hex" => {
             let path = str_arg(args, "path")?;
             let offset = num_arg(args, "offset", 0);
             let length = (num_arg(args, "length", 256) as usize).min(8192);
-            Ok(core::hexdump::dump(&path, offset, length)?)
+            match opt_str(args, "bytes") {
+                None => Ok(core::hexdump::dump(&path, offset, length)?),
+                Some(needle) => {
+                    let limit = (num_arg(args, "limit", 50) as usize).clamp(1, 5_000);
+                    let hits = core::hexdump::find(&path, &needle, limit, 0, false)?;
+                    if hits.is_empty() {
+                        return Ok(format!("{needle} not found\n"));
+                    }
+                    let mut out = format!("{} of {needle}\n", hits.len());
+                    for hit in &hits {
+                        out.push_str(&format!("  0x{:08x}\n", hit.offset));
+                    }
+                    out.push_str(&format!(
+                        "\nfirst hit, 128 bytes\n{}",
+                        core::hexdump::dump(&path, hits[0].offset, 128)?
+                    ));
+                    Ok(out)
+                }
+            }
         }
-        "entropy" => render_entropy(&str_arg(args, "path")?),
+        "entropy" => {
+            let limit = (num_arg(args, "limit", 20) as usize).clamp(1, 1_000);
+            render_entropy(&str_arg(args, "path")?, limit)
+        }
         "imports" => {
             let path = str_arg(args, "path")?;
             let limit = num_arg(args, "limit", 200) as usize;
-            render_symbols(&core::symbols::imports(&path, limit)?, limit, "imports")
+            let filter = opt_str(args, "filter");
+            render_symbols(
+                &core::symbols::imports(&path, limit, filter.as_deref())?,
+                limit,
+                &title_with_filter("imports", filter.as_deref()),
+            )
         }
         "exports" => {
             let path = str_arg(args, "path")?;
             let limit = num_arg(args, "limit", 200) as usize;
-            render_symbols(&core::symbols::exports(&path, limit)?, limit, "exports")
+            let filter = opt_str(args, "filter");
+            // The plugin answered "what is in this zip" from the same tool, and
+            // asking an APK for its exports is a common slip — so an archive is
+            // answered as an archive instead of "not a PE/ELF/Mach-O".
+            let resolved = core::resolve::resolve(&path)?;
+            match core::resolve::list_entries(&resolved) {
+                Ok(entries) => Ok(render_entries(&entries, filter.as_deref(), limit)),
+                Err(_) => render_symbols(
+                    &core::symbols::exports(&path, limit, filter.as_deref())?,
+                    limit,
+                    &title_with_filter("exports", filter.as_deref()),
+                ),
+            }
         }
-        "antidebug" => render_antidebug(&str_arg(args, "path")?),
+        "antidebug" => {
+            let limit = (num_arg(args, "limit", 60) as usize).clamp(1, 1_000);
+            render_antidebug(&str_arg(args, "path")?, limit)
+        }
         "scan" => {
             let path = str_arg(args, "path")?;
             let kind = opt_str(args, "kind").unwrap_or_else(|| "all".to_string());
@@ -549,8 +637,21 @@ pub fn call_tool(name: &str, args: &Value) -> Result<String> {
         "decompile" => {
             let path = str_arg(args, "path")?;
             let class = opt_str(args, "class");
+            let pattern = opt_str(args, "pattern");
+            let regex = args.get("regex").and_then(Value::as_bool).unwrap_or(false);
+            let ignore_case = args
+                .get("ignore_case")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             let limit = (num_arg(args, "limit", 100) as usize).clamp(1, 5_000);
-            core::external::decompile(&path, class.as_deref(), limit)
+            core::external::decompile(
+                &path,
+                class.as_deref(),
+                limit,
+                pattern.as_deref(),
+                regex,
+                ignore_case,
+            )
         }
         "ghidra" => {
             let path = str_arg(args, "path")?;
@@ -611,7 +712,9 @@ pub fn call_tool(name: &str, args: &Value) -> Result<String> {
                 .get("extract")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            core::external::binwalk(&path, extract)
+            let signatures = opt_str(args, "signatures");
+            let limit = (num_arg(args, "limit", 120) as usize).clamp(1, 5_000);
+            core::external::binwalk(&path, extract, signatures.as_deref(), limit)
         }
         "patch" => {
             let path = str_arg(args, "path")?;
@@ -956,8 +1059,14 @@ fn render_strings(path: &str, min: usize, filter: Option<&str>, limit: usize) ->
     Ok(out)
 }
 
-fn render_grep(path: &str, pattern: &str, limit: usize, context: usize) -> Result<String> {
-    let hits = core::hexdump::find(path, pattern, limit, context)?;
+fn render_grep(
+    path: &str,
+    pattern: &str,
+    limit: usize,
+    context: usize,
+    ignore_case: bool,
+) -> Result<String> {
+    let hits = core::hexdump::find(path, pattern, limit, context, ignore_case)?;
     if hits.is_empty() {
         return Ok(format!("no matches for {pattern:?}"));
     }
@@ -971,7 +1080,7 @@ fn render_grep(path: &str, pattern: &str, limit: usize, context: usize) -> Resul
     Ok(out)
 }
 
-fn render_entropy(path: &str) -> Result<String> {
+fn render_entropy(path: &str, limit: usize) -> Result<String> {
     let report = core::entropy::analyze_entropy(path)?;
     let mut out = format!(
         "file entropy {:.4}\nverdict      {}\n",
@@ -981,8 +1090,8 @@ fn render_entropy(path: &str) -> Result<String> {
         out.push_str(&format!("packers      {}\n", report.packers.join(", ")));
     }
     if !report.sections.is_empty() {
-        out.push_str("sections\n");
-        for sect in &report.sections {
+        out.push_str(&format!("sections: {}\n", report.sections.len()));
+        for sect in report.sections.iter().take(limit) {
             out.push_str(&format!(
                 "  {:<20} {:>10} bytes  ent {:.2}{}\n",
                 sect.name,
@@ -991,6 +1100,12 @@ fn render_entropy(path: &str) -> Result<String> {
                 if sect.executable { "  exec" } else { "" }
             ));
         }
+    }
+    if report.sections.len() > limit {
+        out.push_str(&format!(
+            "  ... {} more sections (raise limit)\n",
+            report.sections.len() - limit
+        ));
     }
     if !report.anomalies.is_empty() {
         out.push_str("anomalies\n");
@@ -1024,17 +1139,23 @@ fn render_symbols(symbols: &[core::symbols::Sym], limit: usize, title: &str) -> 
     Ok(out)
 }
 
-fn render_antidebug(path: &str) -> Result<String> {
+fn render_antidebug(path: &str, limit: usize) -> Result<String> {
     let report = core::antidebug::scan(path)?;
     let mut out = format!("score   {}\nverdict {}\n", report.score, report.verdict);
     if report.signals.is_empty() {
         return Ok(out);
     }
-    out.push_str("signals\n");
-    for signal in &report.signals {
+    out.push_str(&format!("signals: {}\n", report.signals.len()));
+    for signal in report.signals.iter().take(limit) {
         out.push_str(&format!(
             "  [{:<6}] {:<28} {}\n",
             signal.kind, signal.value, signal.why
+        ));
+    }
+    if report.signals.len() > limit {
+        out.push_str(&format!(
+            "  ... {} more (raise limit)\n",
+            report.signals.len() - limit
         ));
     }
     Ok(out)
@@ -1099,14 +1220,55 @@ fn render_doctor() -> Result<String> {
 
 fn render_archive(path: &str) -> Result<String> {
     let entries = core::resolve::list_entries(std::path::Path::new(path))?;
-    let mut out = format!("{} entries\n", entries.len());
-    for entry in entries.iter().take(500) {
+    Ok(render_entries(&entries, None, 500))
+}
+
+fn render_entries(
+    entries: &[core::resolve::ArchiveEntry],
+    filter: Option<&str>,
+    limit: usize,
+) -> String {
+    let kept: Vec<_> = match filter {
+        Some(needle) => {
+            let needle = needle.to_lowercase();
+            entries
+                .iter()
+                .filter(|e| e.name.to_lowercase().contains(&needle))
+                .collect()
+        }
+        None => entries.iter().collect(),
+    };
+    if kept.is_empty() {
+        return match filter {
+            Some(needle) => format!(
+                "nothing in the archive matches {needle:?} ({} entries total)\n",
+                entries.len()
+            ),
+            None => format!("{} entries\n", entries.len()),
+        };
+    }
+    let mut out = match filter {
+        Some(needle) => format!(
+            "{} of {} entries match {needle:?}\n",
+            kept.len(),
+            entries.len()
+        ),
+        None => format!("{} entries\n", entries.len()),
+    };
+    for entry in kept.iter().take(limit) {
         out.push_str(&format!("{:>12}  {}\n", entry.size, entry.name));
     }
-    if entries.len() > 500 {
-        out.push_str(&format!("... {} more\n", entries.len() - 500));
+    if kept.len() > limit {
+        out.push_str(&format!("... {} more\n", kept.len() - limit));
     }
-    Ok(out)
+    out
+}
+
+fn title_with_filter(title: &str, filter: Option<&str>) -> String {
+    match filter {
+        Some(needle) => format!("{title} matching {needle:?}"),
+        None => title.to_string(),
+    }
 }
 
 #[cfg(test)]

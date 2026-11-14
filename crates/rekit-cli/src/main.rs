@@ -28,10 +28,19 @@ enum Command {
     Grep {
         path: String,
         pattern: String,
+        /// bytes (where are these bytes) or text (which line says this);
+        /// a regex implies text.
+        #[arg(long)]
+        mode: Option<String>,
+        #[arg(long)]
+        regex: bool,
+        #[arg(long)]
+        ignore_case: bool,
         #[arg(long, default_value_t = 50)]
         limit: usize,
-        #[arg(long, default_value_t = 16)]
-        context: usize,
+        /// Bytes around each hit, or lines around it in text mode.
+        #[arg(long)]
+        context: Option<usize>,
     },
     /// Hex dump of a byte range.
     Hex {
@@ -40,6 +49,9 @@ enum Command {
         offset: u64,
         #[arg(long, default_value_t = 256)]
         length: usize,
+        /// Signature to hunt instead of dumping: hex bytes or "text".
+        #[arg(long)]
+        bytes: Option<String>,
     },
     /// Printable strings, ASCII and UTF-16LE.
     Strings {
@@ -54,24 +66,34 @@ enum Command {
     /// Shannon entropy and packer fingerprints.
     Entropy {
         path: String,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
         #[arg(long)]
         json: bool,
     },
     /// Imported symbols.
     Imports {
         path: String,
+        /// Case-insensitive substring of the name.
+        #[arg(long)]
+        filter: Option<String>,
         #[arg(long, default_value_t = 200)]
         limit: usize,
     },
     /// Exported symbols.
     Exports {
         path: String,
+        /// Case-insensitive substring of the name.
+        #[arg(long)]
+        filter: Option<String>,
         #[arg(long, default_value_t = 200)]
         limit: usize,
     },
     /// Static anti-debug and anti-tamper signals.
     Antidebug {
         path: String,
+        #[arg(long, default_value_t = 60)]
+        limit: usize,
         #[arg(long)]
         json: bool,
     },
@@ -108,6 +130,13 @@ enum Command {
         path: String,
         #[arg(long)]
         class: Option<String>,
+        /// Search the decompiled tree instead of listing it.
+        #[arg(long)]
+        pattern: Option<String>,
+        #[arg(long)]
+        regex: bool,
+        #[arg(long)]
+        ignore_case: bool,
         #[arg(long, default_value_t = 100)]
         limit: usize,
     },
@@ -187,6 +216,11 @@ enum Command {
         path: String,
         #[arg(long)]
         extract: bool,
+        /// Comma separated file types to look for only, e.g. "png,zip".
+        #[arg(long)]
+        signatures: Option<String>,
+        #[arg(long, default_value_t = 120)]
+        limit: usize,
     },
     /// Write bytes at an offset, refusing to proceed on an unexpected value.
     Patch {
@@ -472,19 +506,31 @@ fn main() -> Result<()> {
         Command::Grep {
             path,
             pattern,
+            mode,
+            regex,
+            ignore_case,
             limit,
             context,
         } => render(
             "grep",
-            json!({"path": path, "pattern": pattern, "limit": limit, "context": context}),
+            json!({
+                "path": path,
+                "pattern": pattern,
+                "mode": mode,
+                "regex": regex,
+                "ignore_case": ignore_case,
+                "limit": limit,
+                "context": context,
+            }),
         )?,
         Command::Hex {
             path,
             offset,
             length,
+            bytes,
         } => render(
             "hex",
-            json!({"path": path, "offset": offset, "length": length}),
+            json!({"path": path, "offset": offset, "length": length, "bytes": bytes}),
         )?,
         Command::Strings {
             path,
@@ -495,20 +541,38 @@ fn main() -> Result<()> {
             "strings",
             json!({"path": path, "min": min, "filter": filter, "limit": limit}),
         )?,
-        Command::Entropy { path, json: false } => render("entropy", json!({"path": path}))?,
-        Command::Entropy { path, json: true } => {
-            serde_json::to_string_pretty(&rekit_core::entropy::analyze_entropy(&path)?)?
-        }
-        Command::Imports { path, limit } => {
-            render("imports", json!({"path": path, "limit": limit}))?
-        }
-        Command::Exports { path, limit } => {
-            render("exports", json!({"path": path, "limit": limit}))?
-        }
-        Command::Antidebug { path, json: false } => render("antidebug", json!({"path": path}))?,
-        Command::Antidebug { path, json: true } => {
-            serde_json::to_string_pretty(&rekit_core::antidebug::scan(&path)?)?
-        }
+        Command::Entropy {
+            path,
+            limit,
+            json: false,
+        } => render("entropy", json!({"path": path, "limit": limit}))?,
+        Command::Entropy {
+            path, json: true, ..
+        } => serde_json::to_string_pretty(&rekit_core::entropy::analyze_entropy(&path)?)?,
+        Command::Imports {
+            path,
+            filter,
+            limit,
+        } => render(
+            "imports",
+            json!({"path": path, "filter": filter, "limit": limit}),
+        )?,
+        Command::Exports {
+            path,
+            filter,
+            limit,
+        } => render(
+            "exports",
+            json!({"path": path, "filter": filter, "limit": limit}),
+        )?,
+        Command::Antidebug {
+            path,
+            limit,
+            json: false,
+        } => render("antidebug", json!({"path": path, "limit": limit}))?,
+        Command::Antidebug {
+            path, json: true, ..
+        } => serde_json::to_string_pretty(&rekit_core::antidebug::scan(&path)?)?,
         Command::Scan { path, kind, limit } => {
             render("scan", json!({"path": path, "kind": kind, "limit": limit}))?
         }
@@ -525,9 +589,23 @@ fn main() -> Result<()> {
         Command::R2 { path, kind, target } => {
             render("r2", json!({"path": path, "kind": kind, "target": target}))?
         }
-        Command::Decompile { path, class, limit } => render(
+        Command::Decompile {
+            path,
+            class,
+            pattern,
+            regex,
+            ignore_case,
+            limit,
+        } => render(
             "decompile",
-            json!({"path": path, "class": class, "limit": limit}),
+            json!({
+                "path": path,
+                "class": class,
+                "pattern": pattern,
+                "regex": regex,
+                "ignore_case": ignore_case,
+                "limit": limit,
+            }),
         )?,
         Command::Apktool {
             path,
@@ -599,9 +677,20 @@ fn main() -> Result<()> {
                 "limit": limit,
             }),
         )?,
-        Command::Binwalk { path, extract } => {
-            render("binwalk", json!({"path": path, "extract": extract}))?
-        }
+        Command::Binwalk {
+            path,
+            extract,
+            signatures,
+            limit,
+        } => render(
+            "binwalk",
+            json!({
+                "path": path,
+                "extract": extract,
+                "signatures": signatures,
+                "limit": limit,
+            }),
+        )?,
         Command::Patch {
             path,
             offset,

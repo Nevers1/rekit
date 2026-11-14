@@ -77,17 +77,40 @@ pub fn parse_pattern(pattern: &str) -> Result<Vec<u8>> {
 }
 
 /// All offsets where the pattern occurs, with a short context around each hit.
-pub fn find(spec: &str, pattern: &str, limit: usize, context: usize) -> Result<Vec<Hit>> {
+///
+/// `ignore_case` folds ASCII only: a byte pattern is bytes, and there is no
+/// locale to argue with.
+pub fn find(
+    spec: &str,
+    pattern: &str,
+    limit: usize,
+    context: usize,
+    ignore_case: bool,
+) -> Result<Vec<Hit>> {
     let (_, data) = read_spec(spec)?;
-    let needle = parse_pattern(pattern)?;
+    let mut needle = parse_pattern(pattern)?;
     if needle.is_empty() {
         bail!("empty pattern");
     }
+    if ignore_case {
+        needle.make_ascii_lowercase();
+    }
+
+    let matches_at = |i: usize| -> bool {
+        let window = &data[i..i + needle.len()];
+        match ignore_case {
+            true => window
+                .iter()
+                .zip(needle.iter())
+                .all(|(a, b)| a.eq_ignore_ascii_case(b)),
+            false => window == needle.as_slice(),
+        }
+    };
 
     let mut hits = Vec::new();
     let mut i = 0usize;
     while i + needle.len() <= data.len() {
-        if &data[i..i + needle.len()] == needle.as_slice() {
+        if matches_at(i) {
             let from = i.saturating_sub(context);
             let to = (i + needle.len() + context).min(data.len());
             hits.push(Hit {
@@ -150,7 +173,7 @@ mod tests {
         assert!(text.contains("00000000"));
         assert!(text.contains("|AAAABBBBCCCC"));
 
-        let hits = find(&spec, "\"BBBB\"", 10, 2).unwrap();
+        let hits = find(&spec, "\"BBBB\"", 10, 2, false).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].offset, 4);
     }

@@ -27,6 +27,7 @@ pub mod qemu;
 pub mod resolve;
 pub mod resources;
 pub mod scan;
+pub mod search;
 pub mod strings;
 pub mod symbols;
 pub mod util;

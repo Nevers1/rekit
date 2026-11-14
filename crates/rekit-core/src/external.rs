@@ -322,7 +322,14 @@ pub fn r2(spec: &str, kind: &str, target: Option<&str>) -> Result<String> {
 }
 
 /// jadx is slow and writes a tree, so results are cached per input file.
-pub fn decompile(spec: &str, class: Option<&str>, limit: usize) -> Result<String> {
+pub fn decompile(
+    spec: &str,
+    class: Option<&str>,
+    limit: usize,
+    pattern: Option<&str>,
+    regex: bool,
+    ignore_case: bool,
+) -> Result<String> {
     let path = resolve(spec)?;
     let meta = std::fs::metadata(&path)?;
     let stamp = format!(
@@ -354,6 +361,20 @@ pub fn decompile(spec: &str, class: Option<&str>, limit: usize) -> Result<String
     let mut files = Vec::new();
     collect_java(&out_dir, &mut files, 0)?;
     files.sort();
+
+    if let Some(pattern) = pattern {
+        let opts = crate::search::Options {
+            regex,
+            ignore_case,
+            // jadx output is already indented by nesting; one line of slack is
+            // what makes a match readable, more is noise.
+            context: 1,
+            limit,
+        };
+        let mut out = crate::search::tree(&out_dir, &files, pattern, &opts)?;
+        out.push_str(&format!("decompiled tree: {}\n", out_dir.display()));
+        return Ok(out);
+    }
 
     if let Some(class) = class {
         let wanted = format!("{class}.java");
@@ -394,16 +415,181 @@ fn collect_java(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) -> Result<()> 
     Ok(())
 }
 
-pub fn binwalk(spec: &str, extract: bool) -> Result<String> {
+/// One row of binwalk's map.
+struct Signature {
+    offset: u64,
+    description: String,
+}
+
+/// binwalk 3 prints a fixed-width table whose column width follows the
+/// terminal, so the raw output is a wall of blanks when nothing sets COLUMNS.
+/// Parsing it and re-printing compactly also lets `limit` mean something.
+fn parse_binwalk(raw: &str) -> Vec<Signature> {
+    let mut out = Vec::new();
+    for line in raw.lines() {
+        let line = line.trim_end();
+        let mut parts = line.split_whitespace();
+        let (Some(decimal), Some(hex)) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        if !decimal.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        if !hex.starts_with("0x") && !hex.starts_with("0X") {
+            continue;
+        }
+        let Ok(offset) = u64::from_str_radix(&hex[2..], 16) else {
+            continue;
+        };
+        let description = parts.collect::<Vec<_>>().join(" ");
+        if description.is_empty() {
+            continue;
+        }
+        out.push(Signature {
+            offset,
+            description,
+        });
+    }
+    out
+}
+
+fn walk_files(dir: &Path, prefix: &str, out: &mut Vec<String>, depth: usize) {
+    if depth > 8 || out.len() > 2_000 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = match prefix.is_empty() {
+            true => entry.file_name().to_string_lossy().to_string(),
+            false => format!("{prefix}/{}", entry.file_name().to_string_lossy()),
+        };
+        match path.is_dir() {
+            true => walk_files(&path, &name, out, depth + 1),
+            false => out.push(name),
+        }
+    }
+}
+
+/// binwalk v2 filtered with `-s <list>`, v3 with `--include=<one>`, and v3's
+/// `-y` collects values greedily — `-y zip file.bin` swallows the file name and
+/// fails with "no target file". Binding the value with `=` avoids that whole
+/// class of surprise, and the install's major version decides which syntax it
+/// speaks.
+fn binwalk_filter_args(wanted: &[String]) -> Vec<String> {
+    let major = run(
+        "binwalk",
+        &["--version".to_string()],
+        Duration::from_secs(10),
+    )
+    .ok()
+    .and_then(|out| {
+        out.split_whitespace()
+            .last()
+            .and_then(|v| v.split('.').next())
+            .and_then(|v| v.parse::<u32>().ok())
+    })
+    .unwrap_or(3);
+    if major >= 3 {
+        wanted
+            .iter()
+            .map(|sig| format!("--include={sig}"))
+            .collect()
+    } else {
+        vec!["-s".to_string(), wanted.join(",")]
+    }
+}
+
+/// Carve embedded files, or map them.
+///
+/// `signatures` is binwalk v3's `-y` (only look for these), not v2's `-s`: the
+/// installed major version decides the flag, and asking a v2 binary for `-y`
+/// would silently mean something else.
+pub fn binwalk(
+    spec: &str,
+    extract: bool,
+    signatures: Option<&str>,
+    limit: usize,
+) -> Result<String> {
     let path = resolve(spec)?;
-    let mut args: Vec<String> = Vec::new();
-    if extract {
+    let mut wanted: Vec<String> = Vec::new();
+    if let Some(sigs) = signatures {
+        wanted.extend(
+            sigs.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+        );
+    }
+    let mut args: Vec<String> = binwalk_filter_args(&wanted);
+
+    let out_dir = if extract {
+        let meta = std::fs::metadata(&path)?;
+        let mtime = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let key = format!("{}:{}:{mtime}", path.display(), meta.len());
+        let dir = crate::resolve::cache_root()
+            .join(format!("binwalk-{}", &sha256_hex(key.as_bytes())[..12]));
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("cannot create {}", dir.display()))?;
         args.push("-e".to_string());
         args.push("-C".to_string());
-        args.push(crate::resolve::cache_root().display().to_string());
-    }
+        args.push(dir.display().to_string());
+        Some(dir)
+    } else {
+        None
+    };
+
     args.push(path.display().to_string());
-    run("binwalk", &args, Duration::from_secs(600))
+    let raw = run("binwalk", &args, Duration::from_secs(600))?;
+    let hits = parse_binwalk(&raw);
+    let mut out = String::new();
+    if !wanted.is_empty() {
+        out.push_str(&format!("signatures: {}\n", wanted.join(", ")));
+    }
+    out.push_str(&format!("embedded: {} hits\n", hits.len()));
+    for hit in hits.iter().take(limit) {
+        out.push_str(&format!(
+            "  0x{:08x} {:>10}  {}\n",
+            hit.offset, hit.offset, hit.description
+        ));
+    }
+    if hits.len() > limit {
+        out.push_str(&format!(
+            "  ... {} more (raise limit)\n",
+            hits.len() - limit
+        ));
+    }
+    if hits.is_empty() {
+        out.push_str(
+            "  nothing recognisable — try `signatures` (png,zip,jpeg,exe) \
+             or check with `entropy`\n",
+        );
+    }
+
+    if let Some(dir) = out_dir {
+        let mut files = Vec::new();
+        walk_files(&dir, "", &mut files, 0);
+        files.sort();
+        out.push_str(&format!(
+            "extracted into {} ({} files)\n",
+            dir.display(),
+            files.len()
+        ));
+        for file in files.iter().take(limit) {
+            out.push_str(&format!("  {file}\n"));
+        }
+        if files.len() > limit {
+            out.push_str(&format!("  ... {} more\n", files.len() - limit));
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

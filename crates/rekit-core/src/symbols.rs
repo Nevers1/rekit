@@ -14,8 +14,20 @@ pub struct Sym {
     pub kind: String,
 }
 
+/// Case-insensitive substring match, the way the plugin's `filter` worked: a
+/// caller asking for `str` should not have to spell `strlen` exactly.
+fn keep(name: &str, filter: Option<&str>) -> bool {
+    match filter {
+        Some(needle) => name.to_lowercase().contains(&needle.to_lowercase()),
+        None => true,
+    }
+}
+
 /// Symbols this binary needs from the outside world.
-pub fn imports(spec: &str, limit: usize) -> Result<Vec<Sym>> {
+///
+/// `filter` narrows by name before the limit applies, so asking for 10 `crypt`
+/// imports on a binary with 900 symbols still returns 10.
+pub fn imports(spec: &str, limit: usize, filter: Option<&str>) -> Result<Vec<Sym>> {
     let (_, data) = read_spec(spec)?;
     let mut out = Vec::new();
 
@@ -28,7 +40,7 @@ pub fn imports(spec: &str, limit: usize) -> Result<Vec<Sym>> {
                 let Some(name) = elf.dynstrtab.get_at(sym.st_name) else {
                     continue;
                 };
-                if name.is_empty() {
+                if name.is_empty() || !keep(name, filter) {
                     continue;
                 }
                 out.push(Sym {
@@ -42,7 +54,7 @@ pub fn imports(spec: &str, limit: usize) -> Result<Vec<Sym>> {
                 }
             }
             // Remember which shared objects provide them.
-            if !elf.libraries.is_empty() && out.len() < limit {
+            if !elf.libraries.is_empty() && out.len() < limit && keep("libraries", filter) {
                 out.push(Sym {
                     name: format!("[libraries] {}", elf.libraries.join(", ")),
                     lib: None,
@@ -53,6 +65,9 @@ pub fn imports(spec: &str, limit: usize) -> Result<Vec<Sym>> {
         }
         Object::PE(pe) => {
             for imp in &pe.imports {
+                if !keep(&imp.name, filter) {
+                    continue;
+                }
                 out.push(Sym {
                     name: imp.name.to_string(),
                     lib: Some(imp.dll.to_string()),
@@ -66,6 +81,9 @@ pub fn imports(spec: &str, limit: usize) -> Result<Vec<Sym>> {
         }
         Object::Mach(goblin::mach::Mach::Binary(macho)) => {
             for imp in macho.imports()? {
+                if !keep(imp.name, filter) {
+                    continue;
+                }
                 out.push(Sym {
                     name: imp.name.to_string(),
                     lib: if imp.dylib.is_empty() {
@@ -84,6 +102,9 @@ pub fn imports(spec: &str, limit: usize) -> Result<Vec<Sym>> {
         Object::Mach(goblin::mach::Mach::Fat(fat)) => {
             if let Ok(goblin::mach::SingleArch::MachO(macho)) = fat.get(0) {
                 for imp in macho.imports()? {
+                    if !keep(imp.name, filter) {
+                        continue;
+                    }
                     out.push(Sym {
                         name: imp.name.to_string(),
                         lib: None,
@@ -103,7 +124,7 @@ pub fn imports(spec: &str, limit: usize) -> Result<Vec<Sym>> {
 }
 
 /// Symbols this binary offers to others.
-pub fn exports(spec: &str, limit: usize) -> Result<Vec<Sym>> {
+pub fn exports(spec: &str, limit: usize, filter: Option<&str>) -> Result<Vec<Sym>> {
     let (_, data) = read_spec(spec)?;
     let mut out = Vec::new();
 
@@ -121,7 +142,7 @@ pub fn exports(spec: &str, limit: usize) -> Result<Vec<Sym>> {
                 let Some(name) = elf.dynstrtab.get_at(sym.st_name) else {
                     continue;
                 };
-                if name.is_empty() {
+                if name.is_empty() || !keep(name, filter) {
                     continue;
                 }
                 out.push(Sym {
@@ -137,11 +158,15 @@ pub fn exports(spec: &str, limit: usize) -> Result<Vec<Sym>> {
         }
         Object::PE(pe) => {
             for exp in &pe.exports {
+                let name = exp
+                    .name
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| format!("#{}", exp.rva));
+                if !keep(&name, filter) {
+                    continue;
+                }
                 out.push(Sym {
-                    name: exp
-                        .name
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| format!("#{}", exp.rva)),
+                    name,
                     lib: None,
                     addr: exp.offset.map(|o| o as u64),
                     kind: "export".to_string(),
@@ -153,6 +178,9 @@ pub fn exports(spec: &str, limit: usize) -> Result<Vec<Sym>> {
         }
         Object::Mach(goblin::mach::Mach::Binary(macho)) => {
             for exp in macho.exports()? {
+                if !keep(&exp.name, filter) {
+                    continue;
+                }
                 out.push(Sym {
                     name: exp.name,
                     lib: None,
@@ -167,6 +195,9 @@ pub fn exports(spec: &str, limit: usize) -> Result<Vec<Sym>> {
         Object::Mach(goblin::mach::Mach::Fat(fat)) => {
             if let Ok(goblin::mach::SingleArch::MachO(macho)) = fat.get(0) {
                 for exp in macho.exports()? {
+                    if !keep(&exp.name, filter) {
+                        continue;
+                    }
                     out.push(Sym {
                         name: exp.name,
                         lib: None,
@@ -187,7 +218,7 @@ pub fn exports(spec: &str, limit: usize) -> Result<Vec<Sym>> {
 
 /// Import names only — what the anti-debug and capability scans care about.
 pub fn import_names(spec: &str) -> Result<Vec<String>> {
-    Ok(imports(spec, 20_000)?
+    Ok(imports(spec, 20_000, None)?
         .into_iter()
         .filter(|s| s.kind != "note")
         .map(|s| s.name)
@@ -224,7 +255,7 @@ mod tests {
             "/lib/libc.so.6",
             "/lib64/libc.so.6",
         ] {
-            let Ok(list) = exports(candidate, 20_000) else {
+            let Ok(list) = exports(candidate, 20_000, None) else {
                 continue;
             };
             let names: Vec<&str> = list.iter().map(|s| s.name.as_str()).collect();

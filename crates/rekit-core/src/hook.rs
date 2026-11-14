@@ -147,7 +147,7 @@ fn inspect(spec: &str, symbol: Option<&str>) -> Result<Binary> {
         .file_name()
         .map(|name| name.to_string_lossy().to_string())
         .unwrap_or_else(|| "module".to_string());
-    let exports: Vec<(String, u64)> = crate::symbols::exports(spec, 20_000)
+    let exports: Vec<(String, u64)> = crate::symbols::exports(spec, 20_000, None)
         .unwrap_or_default()
         .into_iter()
         .filter_map(|sym| sym.addr.map(|addr| (sym.name, addr)))
