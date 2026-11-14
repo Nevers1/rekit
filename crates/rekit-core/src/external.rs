@@ -173,6 +173,7 @@ pub fn doctor() -> Vec<Tool> {
         ("rasm2", "assembler behind the asm tool"),
         ("frida", "dynamic instrumentation scripts"),
         ("vol", "memory dumps"),
+        ("curl", "the http tool: TLS, proxies, redirects"),
     ];
 
     let mut tools: Vec<Tool> = TOOLS

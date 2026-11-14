@@ -1,0 +1,16 @@
+[package]
+name = "rekit-web"
+description = "Web-facing analysis: endpoints in bundles, leaked secrets, JWT, live HTTP"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde_json.workspace = true
+regex.workspace = true
+sha2.workspace = true
+rekit-core.workspace = true

@@ -7,11 +7,17 @@
 //! Tool names are bare (`info`, `strings`, ...). A client prefixes them with
 //! the server name, so in OpenCode they show up as `rekit_info`, `rekit_strings`.
 
+// The catalogue is one `json!` literal per tool inside one array, and the
+// macro expands recursively: the default limit of 128 is not enough for
+// thirty-three schemas.
+#![recursion_limit = "512"]
+
 use anyhow::{anyhow, bail, Result};
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
 
 use rekit_core as core;
+use rekit_web as web;
 
 /// Injected into the agent's system prompt by clients that support it.
 pub const INSTRUCTIONS: &str = "\
@@ -22,7 +28,10 @@ format, architecture and whether the file is packed. `grep` searches raw bytes \
 and accepts `\"text\"` or hex such as `de ad be ef`. Start with a small `limit` \
 and raise it only when needed. For Android, `manifest` decodes binary XML in \
 place and `decompile` runs jadx; `disasm`, `r2`, `binwalk` and `patch` need the \
-external tools that `doctor` lists. `patch` always requires `expect`.";
+external tools that `doctor` lists. `patch` always requires `expect`. For web \
+material, `endpoints`, `secrets`, `jwt` and `http` take the same `::` spec, so a \
+bundle inside an APK needs no unpacking; `secrets` masks values unless `reveal` \
+is set.";
 
 /// Start serving on stdin/stdout. Returns when the client closes the pipe.
 pub fn serve() -> Result<()> {
@@ -400,6 +409,54 @@ pub fn tools() -> Value {
             }), &["old", "new"])
         },
         {
+            "name": "endpoints",
+            "description": "Pull every URL, absolute path, API route, query parameter and GraphQL operation out of a JS bundle, HTML page or JSON, with the file and line where each appears. The first thing to run on a frontend bundle or on an APK's assets: it answers what the app talks to without executing anything. Takes a file, a directory (walked recursively) or an archive::inner spec.",
+            "inputSchema": schema(json!({
+                "path": {"type": "string", "description": "file, directory, or apk/zip::inner"},
+                "kind": {"type": "string", "enum": ["all", "url", "path", "param", "graphql"], "description": "what to look for, default all"},
+                "filter": {"type": "string", "description": "regex; only matching values are kept"},
+                "limit": {"type": "integer", "description": "max distinct values per group, default 300"}
+            }), &["path"])
+        },
+        {
+            "name": "secrets",
+            "description": "Find keys and tokens committed by accident: AWS, GCP, GitHub, GitLab, Slack, Stripe, OpenAI, Anthropic, private keys and about thirty more shapes, plus an entropy pass over quoted strings that match no shape at all. Values are masked unless reveal=true, because a report that prints a live key in full leaks it again.",
+            "inputSchema": schema(json!({
+                "path": {"type": "string", "description": "file, directory, or apk/zip::inner"},
+                "minSeverity": {"type": "string", "enum": ["critical", "high", "medium", "low"], "description": "lowest severity to report, default low"},
+                "entropy": {"type": "number", "description": "entropy threshold for the second pass, default 4.3; 0 disables it"},
+                "reveal": {"type": "boolean", "description": "show values in full, default false"},
+                "limit": {"type": "integer", "description": "max findings, default 200"}
+            }), &["path"])
+        },
+        {
+            "name": "jwt",
+            "description": "Read a JWT: header, payload, claims in human terms, and what its signature actually trusts. Points out alg=none, HS* secrets worth guessing, jku/x5u pointing at someone else's key, and kid traversal. With secret it checks the signature; with wordlist it tries to crack it. Pass token for one token or path to find tokens in files.",
+            "inputSchema": schema(json!({
+                "token": {"type": "string", "description": "the JWT itself"},
+                "path": {"type": "string", "description": "or a file/directory/archive to find tokens in"},
+                "secret": {"type": "string", "description": "check the signature against this secret"},
+                "wordlist": {"type": "string", "description": "wordlist to crack an HS256/384/512 secret with"},
+                "limit": {"type": "integer", "description": "how many words to try, default 200000"}
+            }), &[])
+        },
+        {
+            "name": "http",
+            "description": "One HTTP request with full control: method, headers, body, redirects, proxy, timeout. Prints the status, headers, body and a ready curl command for repeating it. This is the tool for the requests a plain fetch cannot make — the POST with a JSON body, the one with someone else's cookie, the one through a proxy.",
+            "inputSchema": schema(json!({
+                "url": {"type": "string", "description": "full http:// or https:// URL"},
+                "method": {"type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"], "description": "default GET"},
+                "headers": {"type": "object", "description": "headers as an object, e.g. {\"Authorization\": \"Bearer ...\"}", "additionalProperties": {"type": "string"}},
+                "body": {"type": "string", "description": "request body as-is"},
+                "json": {"type": "object", "description": "body as a JSON object; also sets Content-Type"},
+                "redirect": {"type": "boolean", "description": "follow redirects, default true"},
+                "timeout": {"type": "integer", "description": "timeout in ms, default 20000"},
+                "proxy": {"type": "string", "description": "proxy, e.g. socks5://127.0.0.1:1300"},
+                "save": {"type": "string", "description": "write the response body to this file"},
+                "bodyOnly": {"type": "boolean", "description": "print the body alone"}
+            }), &["url"])
+        },
+        {
             "name": "doctor",
             "description": "Which external tools are installed (r2, jadx, apktool, ilspycmd, binwalk, frida, vol) and their versions. Call this when a wrapper tool reports a missing dependency.",
             "inputSchema": schema(json!({}), &[])
@@ -685,6 +742,67 @@ pub fn call_tool(name: &str, args: &Value) -> Result<String> {
             let limit = (num_arg(args, "limit", 80) as usize).clamp(1, 5_000);
             Ok(core::diff::render(&report, &mode, limit))
         }
+        "endpoints" => {
+            let req = web::endpoints::Request {
+                path: str_arg(args, "path")?,
+                kind: opt_str(args, "kind").unwrap_or_else(|| "all".to_string()),
+                filter: opt_str(args, "filter"),
+                limit: num_arg(args, "limit", 300) as usize,
+            };
+            web::endpoints::run(&req)
+        }
+        "secrets" => {
+            let req = web::secrets::Request {
+                path: str_arg(args, "path")?,
+                min_severity: opt_str(args, "minSeverity").unwrap_or_else(|| "low".to_string()),
+                entropy: args.get("entropy").and_then(Value::as_f64).unwrap_or(4.3),
+                reveal: args.get("reveal").and_then(Value::as_bool).unwrap_or(false),
+                limit: num_arg(args, "limit", 200) as usize,
+            };
+            web::secrets::run(&req)
+        }
+        "jwt" => {
+            let req = web::jwt::Request {
+                token: opt_str(args, "token"),
+                path: opt_str(args, "path"),
+                secret: opt_str(args, "secret"),
+                wordlist: opt_str(args, "wordlist"),
+                limit: num_arg(args, "limit", 200_000) as usize,
+            };
+            web::jwt::run(&req)
+        }
+        "http" => {
+            let headers = args
+                .get("headers")
+                .and_then(Value::as_object)
+                .map(|map| {
+                    map.iter()
+                        .filter_map(|(key, value)| {
+                            value.as_str().map(|value| (key.clone(), value.to_string()))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let req = web::http::Request {
+                url: str_arg(args, "url")?,
+                method: opt_str(args, "method").unwrap_or_else(|| "GET".to_string()),
+                headers,
+                body: opt_str(args, "body"),
+                json: args.get("json").filter(|value| !value.is_null()).cloned(),
+                redirect: args
+                    .get("redirect")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true),
+                timeout_ms: num_arg(args, "timeout", web::http::DEFAULT_TIMEOUT_MS),
+                proxy: opt_str(args, "proxy"),
+                save: opt_str(args, "save"),
+                body_only: args
+                    .get("bodyOnly")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            };
+            web::http::run(&req)
+        }
         "doctor" => render_doctor(),
         other => bail!("unknown tool {other:?}"),
     }
@@ -944,7 +1062,7 @@ mod tests {
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted.len(), names.len());
-        assert_eq!(names.len(), 29);
+        assert_eq!(names.len(), 33);
     }
 
     #[test]

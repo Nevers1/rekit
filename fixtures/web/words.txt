@@ -1,0 +1,4 @@
+password
+letmein
+your-256-bit-secret
+hunter2

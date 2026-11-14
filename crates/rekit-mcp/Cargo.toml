@@ -13,3 +13,4 @@ anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 rekit-core.workspace = true
+rekit-web.workspace = true

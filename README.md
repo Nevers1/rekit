@@ -101,8 +101,9 @@ opencode mcp add rekit --global -- rekit mcp
 The tools are `info`, `strings`, `grep`, `hex`, `entropy`, `imports`, `exports`,
 `antidebug`, `scan`, `archive`, `manifest`, `apktool`, `resources`, `decompile`,
 `javap`, `dotnet`, `ghidra`, `ida`, `disasm`, `r2`, `asm`, `diff`, `patch`,
-`binwalk`, `emulate`, `emulate_list`, `fuzz`, `hook` and `doctor`; clients prefix
-them with the server name, so the agent sees `rekit_info`.
+`binwalk`, `emulate`, `emulate_list`, `fuzz`, `hook`, `endpoints`, `secrets`,
+`jwt`, `http` and `doctor`; clients prefix them with the server name, so the
+agent sees `rekit_info`.
 
 The server also ships usage instructions in the `initialize` response, so the
 model learns `path::inner` and the `grep` pattern syntax without you writing a
@@ -140,6 +141,10 @@ paragraph in the system prompt.
 | `emulate` | Run one function in a sandboxed CPU and get the real return value — through the anti-debug checks. |
 | `fuzz` | The same call over a range of inputs: where the return changes, which input is the key, which one crashes. |
 | `hook` | A Frida script that logs a function's real arguments and return value; optionally runs the process. |
+| `endpoints` | What a frontend bundle talks to: URLs, API routes, query parameters, GraphQL operations, with file and line. |
+| `secrets` | Keys and tokens committed by accident, by shape and by entropy. Masked unless `reveal` is set. |
+| `jwt` | What a token claims, whether its signature is checked, and whether an HS secret falls to a wordlist. |
+| `http` | One request with method, headers, body, proxy and redirects, plus the curl that repeats it. |
 | `doctor` | Which external tools exist and their versions, so a missing dependency is explained. |
 
 ## CLI
@@ -172,6 +177,10 @@ rekit javap classes --class com.example.Foo
 rekit apktool app.apk --pattern "https://"
 rekit asm "mov eax, 1; ret" --path libnative.so --patch --offset 0x2a8 --expect "f3 0f"
 rekit diff old.so new.so
+rekit endpoints dist/app.js
+rekit secrets dist --min-severity high
+rekit jwt "$TOKEN" --wordlist rockyou.txt
+rekit http https://api.example.com/v2/login --method POST --json '{"user":"a","pass":"b"}'
 rekit doctor
 ```
 
@@ -352,6 +361,128 @@ the mapped module is computed from the binary's image base, which is the part a
 shared object (`0`) and a PE (`0x140000000`, or whatever its linker picked)
 disagree about.
 
+## The other half: web material
+
+An APK is not only native code, and a target is not only an app. The same
+investigation usually reaches a frontend bundle: `dist/`, `assets/`, a JS blob
+pulled out of a device. That material has no sections or imports — the useful
+facts are in strings, and the questions are different. Four tools answer them,
+and all four take a file, a directory walked recursively, or an
+`archive::inner` spec, so a bundle inside an APK needs no manual unpacking.
+
+```console
+$ rekit endpoints fixtures/web
+# fixtures/web
+files: 3, read: 1 KB
+
+## URLs: 4
+  //cdn.example.net/static/app.js
+      fixtures/web/app.js:4 (+1)
+  https://api.example.com/v2
+      fixtures/web/app.js:3
+  https://api.example.com/v2/login?client=web
+      fixtures/web/app.js:7
+  https://forms.example.com/submit
+      fixtures/web/index.html:6
+
+## Paths and API routes: 2
+  /api/v2/profile
+      fixtures/web/app.js:13
+  /api/v2/sessions?page=1&size=20
+      fixtures/web/app.js:16
+
+## Parameters: 3
+  client
+      fixtures/web/app.js:7
+...
+```
+
+The patterns are deliberately loose, because a minified bundle quotes strings
+five ways and an exact grammar finds nothing. The junk filter is what keeps the
+report readable: `/assets/logo.png` and `/favicon.ico` are not endpoints, and a
+URL handed to `fetch` is listed once, as a URL, rather than again as a path.
+
+`secrets` runs two passes: a table of about thirty credential shapes (AWS,
+GitHub, GitLab, Slack, Stripe, OpenAI, Anthropic, private keys, …) and an
+entropy pass over quoted strings that matched no shape at all — which is what
+catches a token format nobody wrote a rule for yet.
+
+```
+$ rekit secrets fixtures/web
+hits: 4 (patterns: 3, entropy: 1), values masked (reveal=true to show them)
+files: 3
+
+## critical (1)
+  AWS access key ID: AKIAIO••••••••MPLE
+      fixtures/web/app.js:23
+      const AWS_KEY = "AKIAIO••••••••MPLE";
+
+## medium (1)
+  Password in code: hunter••••••••ter2
+      fixtures/web/app.js:24
+      const DB = { password: "hunter••••••••ter2" };
+
+## low (2)
+  JWT: eyJhbG••••••••sw5c
+  high entropy (5.23): Zk9xS2••••••••V8cX
+```
+
+Values are masked by default, and the context line is masked with them —
+printing the line unchanged would defeat the mask. `--reveal` exists for a key
+that is already known dead. A value is counted once, so the token matched by the
+JWT shape is not reported again by the entropy pass, and the entropy pass is
+skipped entirely when the severity floor is above `low`, because it can only
+ever produce lows.
+
+`jwt` decodes, then asks what the token trusts:
+
+```console
+$ rekit jwt "$TOKEN" --secret your-256-bit-secret
+## Claims
+  issued: 2018-01-18T01:30:22Z (expired 3222.6 days ago)
+  sub: 1234567890
+
+## Signature
+  the signature matches this secret
+
+## What to look at
+  - HS256 — a symmetric secret, so it can be guessed from a wordlist (see wordlist)
+```
+
+`alg=none`, `jku`/`x5u` pointing at someone else's key set, and a `kid` that
+looks like path traversal are reported as warnings, because those are the shapes
+that turn a token into an authentication bypass. `--wordlist` tries an HS256/384/512
+secret against a list and says how many words it got through; the HMAC is twenty
+lines over `sha2`, so no dependency tree arrives for one function.
+
+`http` is the request a plain fetch cannot make: a POST with a JSON body, someone
+else's cookie, a proxy to the staging host, a redirect left unfollowed.
+
+```console
+$ rekit http https://api.example.com/v2/login --method POST --json '{"user":"a","pass":"b"}'
+# POST https://api.example.com/v2/login
+## Response
+  200  126 B  31 ms
+
+## Headers
+HTTP/1.1 200 OK
+  Content-Type: application/json
+...
+## Repeat
+curl -i -X POST -H 'Content-Type: application/json' --data '{"user":"a","pass":"b"}' -L 'https://api.example.com/v2/login'
+```
+
+It shells out to `curl` rather than linking a TLS stack: HTTPS in-process would
+add a large dependency tree to a tool whose point is one static binary, and
+`curl` is on every machine that would run this. Only `http://` and `https://`
+are accepted (`file://` and `gopher://` are refused before curl sees them), a
+header containing a newline is rejected instead of used to smuggle a second
+request, and the printed status is the one that was actually returned, with the
+redirect target named when there was one.
+
+These four are English like the rest of the output; the old plugin's Russian
+wording was translated so the reports read consistently.
+
 ## What it does not do yet
 
 Honest scope for `0.1`.
@@ -359,10 +490,12 @@ Honest scope for `0.1`.
 - **Formats are parsed in Rust**: ELF, PE, Mach-O, zip, tar.gz, gz, Android
   binary XML, plus magic-byte detection for DEX, JAR, APK, wasm, PDF, SQLite and
   Android boot images. Nothing is executed and no external tool is needed.
-- **Disassembly, decompilation, carving and hooks are wrappers** around
+- **Disassembly, decompilation, carving, hooks and HTTP are wrappers** around
   `llvm-objdump`, `r2`, `jadx`, `apktool`, `binwalk`, Ghidra, IDA, `ilspycmd`,
-  `javap` and `frida`. `doctor` reports what is missing instead of failing
-  later.
+  `javap`, `frida` and `curl`. `doctor` reports what is missing instead of
+  failing later.
+- `endpoints`, `secrets` and `jwt` are pure Rust: no external tool, no network.
+  Only `http` leaves the machine, and only to the URL it was given.
 - DEX, JVM and .NET get format detection and offsets, not structure: use
   `decompile`, `javap` or `dotnet` for the readable view.
 - `ar`/`deb` payloads are recognised but not unpacked.
@@ -373,6 +506,10 @@ Honest scope for `0.1`.
   only on the host it runs on.
 - JNI is not emulated: a function that expects a real `JNIEnv` gets none, so
   native code calling back into Java faults instead of answering.
+- The web tools read text, not behaviour: `endpoints` reports a route found in
+  a bundle, not whether it exists, and `secrets` reports a key by its shape — a
+  high-entropy string that is really a hash, or a live key that matches no
+  known shape, can still be wrong.
 
 Next on the list: program-level emulation, so a binary can be run until a
 specific branch instead of only one function at a time.
@@ -390,7 +527,8 @@ fresh clone with no samples.
 
 ## License
 
-`rekit` core, CLI and MCP server are **MIT**. See [LICENSE](LICENSE).
+`rekit` core, CLI, MCP server and the web crate are **MIT**. See
+[LICENSE](LICENSE).
 
 `rekit-emu` is a separate binary under **GPL-2.0** (`crates/rekit-emu/LICENSE`),
 because it links [Unicorn](https://www.unicorn-engine.org/), which is GPL-2.0.

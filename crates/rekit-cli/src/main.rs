@@ -334,6 +334,80 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// What a frontend bundle talks to: URLs, API routes, parameters, GraphQL.
+    Endpoints {
+        path: String,
+        /// all | url | path | param | graphql
+        #[arg(long, default_value = "all")]
+        kind: String,
+        /// Only keep values matching this regex.
+        #[arg(long)]
+        filter: Option<String>,
+        /// Max distinct values per group.
+        #[arg(long, default_value_t = 300)]
+        limit: usize,
+    },
+    /// Keys and tokens committed by accident, with an entropy pass.
+    Secrets {
+        path: String,
+        /// critical | high | medium | low
+        #[arg(long = "min-severity", default_value = "low")]
+        min_severity: String,
+        /// Entropy threshold for the second pass; 0 disables it.
+        #[arg(long, default_value_t = 4.3)]
+        entropy: f64,
+        /// Show values in full.
+        #[arg(long)]
+        reveal: bool,
+        #[arg(long, default_value_t = 200)]
+        limit: usize,
+    },
+    /// Read a JWT, check its signature, or crack its secret.
+    Jwt {
+        /// The token itself.
+        token: Option<String>,
+        /// Or a file/directory/archive to find tokens in.
+        #[arg(long)]
+        path: Option<String>,
+        /// Check the signature against this secret.
+        #[arg(long)]
+        secret: Option<String>,
+        /// Crack an HS256/384/512 secret with this wordlist.
+        #[arg(long)]
+        wordlist: Option<String>,
+        /// How many words to try.
+        #[arg(long, default_value_t = 200_000)]
+        limit: usize,
+    },
+    /// One HTTP request with full control, printed with a repeatable curl.
+    Http {
+        url: String,
+        #[arg(long, default_value = "GET")]
+        method: String,
+        /// Header as "Name: value"; repeatable.
+        #[arg(long)]
+        header: Vec<String>,
+        /// Request body as-is.
+        #[arg(long)]
+        body: Option<String>,
+        /// Body as a JSON string; also sets Content-Type.
+        #[arg(long)]
+        json: Option<String>,
+        /// Do not follow redirects.
+        #[arg(long)]
+        no_redirect: bool,
+        /// Timeout in milliseconds.
+        #[arg(long, default_value_t = 20_000)]
+        timeout: u64,
+        #[arg(long)]
+        proxy: Option<String>,
+        /// Write the response body to this file.
+        #[arg(long)]
+        save: Option<String>,
+        /// Print the body alone.
+        #[arg(long)]
+        body_only: bool,
+    },
     /// Which external tools are installed.
     Doctor,
     /// Run the MCP server on stdin/stdout.
@@ -616,6 +690,92 @@ fn main() -> Result<()> {
                 rekit_core::emulate::list(&path, filter.as_deref(), json)?
             );
             return Ok(());
+        }
+        Command::Endpoints {
+            path,
+            kind,
+            filter,
+            limit,
+        } => render(
+            "endpoints",
+            json!({"path": path, "kind": kind, "filter": filter, "limit": limit}),
+        )?,
+        Command::Secrets {
+            path,
+            min_severity,
+            entropy,
+            reveal,
+            limit,
+        } => render(
+            "secrets",
+            json!({
+                "path": path,
+                "minSeverity": min_severity,
+                "entropy": entropy,
+                "reveal": reveal,
+                "limit": limit,
+            }),
+        )?,
+        Command::Jwt {
+            token,
+            path,
+            secret,
+            wordlist,
+            limit,
+        } => render(
+            "jwt",
+            json!({
+                "token": token,
+                "path": path,
+                "secret": secret,
+                "wordlist": wordlist,
+                "limit": limit,
+            }),
+        )?,
+        Command::Http {
+            url,
+            method,
+            header,
+            body,
+            json: json_body,
+            no_redirect,
+            timeout,
+            proxy,
+            save,
+            body_only,
+        } => {
+            // `--header "Name: value"` is what a person types; the tool wants
+            // the pair split, and a header without a colon is a mistake worth
+            // naming rather than sending.
+            let mut headers = serde_json::Map::new();
+            for line in header {
+                let (name, value) = line
+                    .split_once(':')
+                    .ok_or_else(|| anyhow::anyhow!("--header {line:?} is not \"Name: value\""))?;
+                headers.insert(name.trim().to_string(), json!(value.trim()));
+            }
+            let json_value = match json_body {
+                Some(text) => Some(
+                    serde_json::from_str::<serde_json::Value>(&text)
+                        .map_err(|err| anyhow::anyhow!("--json is not valid JSON: {err}"))?,
+                ),
+                None => None,
+            };
+            render(
+                "http",
+                json!({
+                    "url": url,
+                    "method": method,
+                    "headers": headers,
+                    "body": body,
+                    "json": json_value,
+                    "redirect": !no_redirect,
+                    "timeout": timeout,
+                    "proxy": proxy,
+                    "save": save,
+                    "bodyOnly": body_only,
+                }),
+            )?
         }
         Command::Doctor => render("doctor", json!({}))?,
     };

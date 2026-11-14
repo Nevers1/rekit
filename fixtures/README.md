@@ -99,3 +99,76 @@ untouched(10) = 11
 Three `[->]` lines, three `[<-]` lines, and nothing for `untouched`: attaching to
 the wrong export would show up as extra or missing lines rather than a plausible
 but wrong result.
+
+## Web fixtures
+
+`web/` is text, not a binary, so it needs no build step: three files with known
+answers for the four web tools.
+
+| File | Holds |
+| --- | --- |
+| `app.js` | two hosts, two API routes, a query string, a GraphQL query, an AWS key, a password, a random token and a JWT |
+| `index.html` | a protocol-relative script, a form action, and two asset paths that must be filtered out |
+| `words.txt` | four words, the third of which is the JWT's secret |
+
+```console
+$ rekit endpoints fixtures/web
+## URLs: 4
+  //cdn.example.net/static/app.js          (app.js:4, and index.html)
+  https://api.example.com/v2               (app.js:3)
+  https://api.example.com/v2/login?client=web
+  https://forms.example.com/submit
+
+## Paths and API routes: 2
+  /api/v2/profile
+  /api/v2/sessions?page=1&size=20
+
+## Parameters: 3
+  client, page, size
+
+## GraphQL: 1
+  query GetProfile
+```
+
+Assets are absent on purpose: `/assets/avatar.png`, `/assets/logo.png` and
+`/favicon.ico` are in the fixtures and must not appear. The full URL passed to
+`fetch` shows up once, as a URL, not again as a path.
+
+```console
+$ rekit secrets fixtures/web --reveal
+## critical (1)
+  AWS access key ID: AKIAIOSFODNN7EXAMPLE
+
+## medium (1)
+  Password in code: hunter2hunter2
+
+## low (2)
+  JWT: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIi…
+  high entropy (5.23): Zk9xS2pM4vQ8wR1tY6uI0oP3aS7dF5gH2jK4lN6bV8cX
+```
+
+The token is elided above; the tool prints it whole. Without `--reveal` the
+values are masked (`AKIAIO••••••••MPLE`), and the context line is masked with
+them. Four findings come from three pattern hits
+and one entropy hit: the JWT is not reported twice, because a value is counted
+once whatever matched it.
+
+A live Stripe key is deliberately not in the fixture. Shaped like a real one it
+would be blocked by GitHub's push protection, which is the correct behaviour —
+so that rule is unit-tested with a value built at runtime instead.
+
+The JWT is jwt.io's example, signed with `your-256-bit-secret`:
+
+```console
+$ rekit jwt "$TOKEN" --secret your-256-bit-secret
+## Signature
+  the signature matches this secret
+
+$ rekit jwt "$TOKEN" --wordlist fixtures/web/words.txt
+## Cracking
+SECRET FOUND: "your-256-bit-secret"
+tried 3 of 4 in 0.0s
+```
+
+`tried 3 of 4` is the check that the crack path really iterates: the fourth word
+is never needed.

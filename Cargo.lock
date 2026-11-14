@@ -588,8 +588,20 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "rekit-core",
+ "rekit-web",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "rekit-web"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "regex",
+ "rekit-core",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]

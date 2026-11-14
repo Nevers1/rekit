@@ -1,6 +1,12 @@
 [workspace]
 resolver = "2"
-members = ["crates/rekit-core", "crates/rekit-mcp", "crates/rekit-cli", "crates/rekit-emu"]
+members = [
+    "crates/rekit-core",
+    "crates/rekit-mcp",
+    "crates/rekit-cli",
+    "crates/rekit-emu",
+    "crates/rekit-web",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -23,6 +29,7 @@ regex = "1"
 clap = { version = "4", features = ["derive"] }
 rekit-core = { path = "crates/rekit-core" }
 rekit-mcp = { path = "crates/rekit-mcp" }
+rekit-web = { path = "crates/rekit-web" }
 
 [profile.release]
 lto = "thin"
