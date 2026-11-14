@@ -14,6 +14,22 @@ int t_fmt(char *buf, int n) { return snprintf(buf, n, "%s-%d", "abc", 42); }
  * (no FP support in a bare machine), while QEMU returns 5 for (3, 4). */
 double t_hypot(double a, double b) { return hypot(a, b); }
 
+/* Returns a pointer: the return value is an address, and `--read-ret` is what
+ * turns it into the string it points at. */
+const char *t_dup(void) { return strdup("emulated string"); }
+
+/* Mixed argument kinds: 3 + 2.5 + 4 = 9.5, so an emulator that puts the
+ * double in an integer register (or the pointer in a float one) is obvious. */
+double t_mix(int n, double x, const char *s) { return n + x + (double)strlen(s); }
+
+/* Every libm call the emulator answers itself, in one number: 4 + 8 + 3 + 1
+ * + 2 + 5 + 0 + 2.5 + 3 + 16 = 44.5. */
+double t_math(void) {
+    return sqrt(16.0) + pow(2.0, 3.0) + fmod(7.0, 4.0) + floor(1.7)
+         + ceil(1.2) + hypot(3.0, 4.0) + sin(0.0) + fabs(-2.5)
+         + (double)sqrtf(9.0f) + (double)powf(2.0f, 4.0f);
+}
+
 __attribute__((noinline))
 int t_hello(void) {
     const char *msg = "hello from emulation";

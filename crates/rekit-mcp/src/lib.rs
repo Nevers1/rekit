@@ -350,13 +350,13 @@ pub fn tools() -> Value {
         },
         {
             "name": "emulate",
-            "description": "Actually execute one function from a PE/ELF/Mach-O in a sandboxed CPU and report what it returns. This is the only tool that gives facts instead of guesses about obfuscated licence, password, integrity and anti-debug checks: ptrace returns 0, TracerPid is 0, no debugger is present, time advances, random bytes look real. Call `emulate_list` first when you do not know the function name. Arguments go in a string: numbers may be hex, strings are written str:\"text\" with quotes when they contain commas, and `env` passes the fake JNIEnv (supplied automatically for a symbol starting with Java_). engine=qemu runs the function in a real process instead, which is the only way to run AArch64 floating point, TLS and constructors, but it needs a symbol and takes numbers only.",
+            "description": "Actually execute one function from a PE/ELF/Mach-O in a sandboxed CPU and report what it returns. This is the only tool that gives facts instead of guesses about obfuscated licence, password, integrity and anti-debug checks: ptrace returns 0, TracerPid is 0, no debugger is present, time advances, random bytes look real. Call `emulate_list` first when you do not know the function name. Arguments go in a string: numbers may be hex, strings are written str:\"text\" with quotes when they contain commas, and `env` passes the fake JNIEnv (supplied automatically for a symbol starting with Java_). Arguments carry their kind: 3 is an integer, 3.0 and f:3 are doubles (passed in the floating-point registers the ABI names), str:... is a pointer to a string on the emulated heap. engine=qemu runs the function in a real process instead, for TLS, constructors and a call that reaches into libc instead of through an import, but it needs a symbol and takes numbers only.",
             "inputSchema": schema(json!({
                 "path": {"type": "string", "description": "file path; archive members must be extracted first, so pass a real file"},
                 "symbol": {"type": "string", "description": "exported function name"},
                 "address": {"type": "string", "description": "hex address to call instead of a name"},
                 "entry": {"type": "boolean", "description": "call the binary entry point"},
-                "args": {"type": "string", "description": "comma separated: 1,0x20,str:\"hello, world\""},
+                "args": {"type": "string", "description": "comma separated: 1,0x20,str:\"hello, world\"; a decimal point or f: makes an argument a double (3.5, f:3)"},
                 "max_insns": {"type": "integer", "description": "instruction budget, default 2000000"},
                 "timeout_ms": {"type": "integer", "description": "wall clock budget, default 10000"},
                 "vfs": {"type": "boolean", "description": "answer file reads with a fake /proc and /dev (default true); turn off to see what the code complains about"},
@@ -367,6 +367,7 @@ pub fn tools() -> Value {
                 "harness": {"type": "string", "description": "qemu: a prebuilt harness instead of the cached one"},
                 "regs": {"type": "string", "description": "registers to report after the run, e.g. 'rax,rdi' or 'x0,x1'"},
                 "read_ranges": {"type": "string", "description": "memory to read back after the run: 'addr:size:label', comma separated. This is how you see what the function decrypted into a buffer"},
+                "read_ret": {"type": "integer", "description": "read this many bytes at the returned pointer: the function that builds a string or fills a struct answers with an address, and the address alone says nothing"},
                 "trace": {"type": "boolean", "description": "record executed instructions and show the first 24 disassembled; use it to see where a check actually goes"},
                 "stubs": {"type": "string", "description": "answer an address with an import call: '0x401040=strlen' or '0x401040=strlen:32' to force the value. Lets a static binary be emulated without its import table"},
                 "json": {"type": "boolean", "description": "return the raw report instead of a summary"}
@@ -871,6 +872,7 @@ pub fn call_tool(name: &str, args: &Value) -> Result<String> {
                 sysroot: opt_str(args, "sysroot"),
                 harness: opt_str(args, "harness"),
                 read_ranges: str_list(args, "read_ranges"),
+                read_ret: num_arg(args, "read_ret", 0) as usize,
                 regs: str_list(args, "regs"),
                 trace: args.get("trace").and_then(Value::as_bool).unwrap_or(false),
                 stubs: str_list(args, "stubs"),

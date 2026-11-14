@@ -300,7 +300,9 @@ enum Command {
         address: Option<String>,
         #[arg(long)]
         entry: bool,
-        /// Comma separated: `1,0x20,str:"hello, world"`.
+        /// Comma separated: `1,0x20,3.5,str:"hello, world"`. A decimal point
+        /// (or `f:`) makes an argument a double, which the ABI passes in the
+        /// floating-point registers.
         #[arg(long, default_value = "", allow_hyphen_values = true)]
         args: String,
         #[arg(long, default_value_t = 2_000_000)]
@@ -331,6 +333,9 @@ enum Command {
         /// Read memory after the run: addr:size:label, repeatable.
         #[arg(long = "read", value_name = "ADDR:SIZE:LABEL")]
         read_ranges: Vec<String>,
+        /// Read this many bytes at the returned pointer.
+        #[arg(long, value_name = "BYTES")]
+        read_ret: Option<usize>,
         /// Record executed instructions and show the head of the trace.
         #[arg(long)]
         trace: bool,
@@ -863,6 +868,7 @@ fn main() -> Result<()> {
             harness,
             regs,
             read_ranges,
+            read_ret,
             trace,
             stubs,
             json,
@@ -884,6 +890,7 @@ fn main() -> Result<()> {
                 "harness": harness,
                 "regs": regs,
                 "read_ranges": read_ranges,
+                "read_ret": read_ret,
                 "trace": trace,
                 "stubs": stubs,
                 "json": json,

@@ -40,9 +40,20 @@ const TRACE_SHOWN: usize = 24;
 #[derive(Clone, Debug)]
 pub enum Arg {
     Num(u64),
+    /// A `double`, passed in the floating-point registers the ABI names for
+    /// them. Integer and float arguments live in different files, which is why
+    /// an argument has to say which it is.
+    Float(f64),
     Str(String),
     /// The fake `JNIEnv`, for a native method that expects one first.
     Env,
+}
+
+/// An argument after strings turned into heap addresses.
+#[derive(Clone, Copy)]
+enum Slot {
+    Int(u64),
+    Float(f64),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -366,6 +377,10 @@ pub struct Options {
     pub regs: Vec<String>,
     /// Memory to read after the run.
     pub read_ranges: Vec<ReadRange>,
+    /// Read this many bytes at the returned pointer. A function that builds a
+    /// string or fills a struct answers with an address, and the address alone
+    /// says nothing.
+    pub read_ret: usize,
     /// Address to import call, replacing whatever the loader wired there.
     pub overrides: HashMap<u64, Override>,
 }
@@ -381,6 +396,7 @@ impl Default for Options {
             trace: false,
             regs: Vec::new(),
             read_ranges: Vec::new(),
+            read_ret: 0,
             overrides: HashMap::new(),
         }
     }
@@ -666,7 +682,17 @@ impl Machine {
         // Read the extras while the machine is still alive: after this the
         // memory is gone.
         let regs = read_regs(&self.uc, arch, &opts.regs);
-        let reads = read_out(&self.uc, &opts.read_ranges);
+        let mut reads = read_out(&self.uc, &opts.read_ranges);
+        if opts.read_ret > 0 && ret != 0 {
+            reads.extend(read_out(
+                &self.uc,
+                &[ReadRange {
+                    addr: ret,
+                    size: opts.read_ret,
+                    label: "ret".to_string(),
+                }],
+            ));
+        }
         let disasm = if opts.trace {
             disassemble(&self.uc, arch, &state.trace, TRACE_SHOWN, opts.thumb)
         } else {
@@ -717,17 +743,20 @@ impl Machine {
         let arch = self.loaded.arch;
         let platform = self.loaded.platform;
 
-        // Strings live in the heap; replace them with their addresses.
-        let mut resolved = Vec::with_capacity(args.len());
+        // Strings live in the heap; replace them with their addresses. From
+        // here on an argument knows whether it is an integer or a double,
+        // because the two go to different registers.
+        let mut resolved: Vec<Slot> = Vec::with_capacity(args.len());
         for arg in args {
             match arg {
-                Arg::Num(n) => resolved.push(*n),
+                Arg::Num(n) => resolved.push(Slot::Int(*n)),
+                Arg::Float(f) => resolved.push(Slot::Float(*f)),
                 Arg::Env => {
                     let env = self.st.borrow().jni_env;
                     if env == 0 {
                         bail!("this build has no JNIEnv to pass");
                     }
-                    resolved.push(env);
+                    resolved.push(Slot::Int(env));
                 }
                 Arg::Str(s) => {
                     let addr = {
@@ -741,7 +770,7 @@ impl Machine {
                         .mem_write(addr, s.as_bytes())
                         .and_then(|_| self.uc.mem_write(addr + s.len() as u64, &[0]))
                         .map_err(|e| anyhow::anyhow!("cannot write argument: {e}"))?;
-                    resolved.push(addr);
+                    resolved.push(Slot::Int(addr));
                 }
             }
         }
@@ -753,10 +782,10 @@ impl Machine {
         if crate::jni::wants_env(symbol) {
             let env = self.st.borrow().jni_env;
             if env != 0 {
-                if resolved.is_empty() {
-                    resolved.push(env);
-                } else if resolved[0] == 0 {
-                    resolved[0] = env;
+                match resolved.first_mut() {
+                    None => resolved.push(Slot::Int(env)),
+                    Some(Slot::Int(value)) if *value == 0 => *value = env,
+                    Some(_) => {}
                 }
             }
         }
@@ -785,6 +814,7 @@ impl Machine {
                     ]
                 };
                 let nregs = if win { 4 } else { 6 };
+                let shadow = if win { 0x20 } else { 0 };
                 let rsp = base - 8;
                 write_ptr(&mut self.uc, arch, rsp, SENTINEL)?;
                 if win {
@@ -792,15 +822,42 @@ impl Machine {
                     let zeros = [0u8; 0x20];
                     let _ = self.uc.mem_write(base, &zeros);
                 }
-                for (i, value) in resolved.iter().enumerate() {
-                    if i < nregs {
-                        self.uc
-                            .reg_write(regs[i], *value)
-                            .map_err(|e| anyhow::anyhow!("cannot set argument register: {e}"))?;
-                    } else {
-                        let offset = if win { 0x20 } else { 0 };
-                        let addr = base + offset + 8 * (i - nregs) as u64;
-                        write_ptr(&mut self.uc, arch, addr, *value)?;
+                let (mut int_i, mut float_i, mut stack_i) = (0usize, 0usize, 0usize);
+                for slot in &resolved {
+                    match *slot {
+                        Slot::Int(value) => {
+                            if int_i < nregs {
+                                self.uc.reg_write(regs[int_i], value).map_err(|e| {
+                                    anyhow::anyhow!("cannot set argument register: {e}")
+                                })?;
+                            } else {
+                                write_ptr(
+                                    &mut self.uc,
+                                    arch,
+                                    base + shadow + 8 * stack_i as u64,
+                                    value,
+                                )?;
+                                stack_i += 1;
+                            }
+                            int_i += 1;
+                        }
+                        Slot::Float(value) => {
+                            if float_i < 8 {
+                                self.uc
+                                    .reg_write_long(
+                                        RegisterX86::XMM0 as i32 + float_i as i32,
+                                        &value.to_le_bytes(),
+                                    )
+                                    .map_err(|e| {
+                                        anyhow::anyhow!("cannot set float argument: {e}")
+                                    })?;
+                            } else {
+                                let addr = base + shadow + 8 * stack_i as u64;
+                                write_bytes(&mut self.uc, addr, &value.to_le_bytes());
+                                stack_i += 1;
+                            }
+                            float_i += 1;
+                        }
                     }
                 }
                 // SysV variadic ABI: al = number of vector registers used.
@@ -813,10 +870,22 @@ impl Machine {
                     .map_err(|e| anyhow::anyhow!("cannot set program counter: {e}"))?;
             }
             Arch::X86 => {
+                // Everything goes on the stack, in order; a double takes two
+                // slots and is written whole.
                 let esp = base - 4;
                 write_ptr(&mut self.uc, arch, esp, SENTINEL)?;
-                for (i, value) in resolved.iter().enumerate() {
-                    write_ptr(&mut self.uc, arch, base + 4 * i as u64, *value)?;
+                let mut offset = 0u64;
+                for slot in &resolved {
+                    match *slot {
+                        Slot::Int(value) => {
+                            write_ptr(&mut self.uc, arch, base + offset, value)?;
+                            offset += 4;
+                        }
+                        Slot::Float(value) => {
+                            write_bytes(&mut self.uc, base + offset, &value.to_le_bytes());
+                            offset += 8;
+                        }
+                    }
                 }
                 self.uc
                     .reg_write(RegisterX86::ESP, esp)
@@ -837,13 +906,42 @@ impl Machine {
                     RegisterARM64::X6,
                     RegisterARM64::X7,
                 ];
-                for (i, value) in resolved.iter().enumerate() {
-                    if i < regs.len() {
-                        self.uc
-                            .reg_write(regs[i], *value)
-                            .map_err(|e| anyhow::anyhow!("cannot set argument register: {e}"))?;
-                    } else {
-                        write_ptr(&mut self.uc, arch, sp + 8 * (i - regs.len()) as u64, *value)?;
+                let (mut int_i, mut float_i, mut stack_i) = (0usize, 0usize, 0usize);
+                for slot in &resolved {
+                    match *slot {
+                        Slot::Int(value) => {
+                            if int_i < regs.len() {
+                                self.uc.reg_write(regs[int_i], value).map_err(|e| {
+                                    anyhow::anyhow!("cannot set argument register: {e}")
+                                })?;
+                            } else {
+                                write_ptr(&mut self.uc, arch, sp + 8 * stack_i as u64, value)?;
+                                stack_i += 1;
+                            }
+                            int_i += 1;
+                        }
+                        Slot::Float(value) => {
+                            if float_i < 8 {
+                                let mut quad = [0u8; 16];
+                                quad[..8].copy_from_slice(&value.to_le_bytes());
+                                self.uc
+                                    .reg_write_long(
+                                        RegisterARM64::Q0 as i32 + float_i as i32,
+                                        &quad,
+                                    )
+                                    .map_err(|e| {
+                                        anyhow::anyhow!("cannot set float argument: {e}")
+                                    })?;
+                            } else {
+                                write_bytes(
+                                    &mut self.uc,
+                                    sp + 8 * stack_i as u64,
+                                    &value.to_le_bytes(),
+                                );
+                                stack_i += 1;
+                            }
+                            float_i += 1;
+                        }
                     }
                 }
                 self.uc
@@ -865,13 +963,38 @@ impl Machine {
                     RegisterARM::R2,
                     RegisterARM::R3,
                 ];
-                for (i, value) in resolved.iter().enumerate() {
-                    if i < regs.len() {
-                        self.uc
-                            .reg_write(regs[i], *value)
-                            .map_err(|e| anyhow::anyhow!("cannot set argument register: {e}"))?;
-                    } else {
-                        write_ptr(&mut self.uc, arch, sp + 4 * (i - regs.len()) as u64, *value)?;
+                let (mut int_i, mut float_i, mut stack_i) = (0usize, 0usize, 0usize);
+                for slot in &resolved {
+                    match *slot {
+                        Slot::Int(value) => {
+                            if int_i < regs.len() {
+                                self.uc.reg_write(regs[int_i], value).map_err(|e| {
+                                    anyhow::anyhow!("cannot set argument register: {e}")
+                                })?;
+                            } else {
+                                write_ptr(&mut self.uc, arch, sp + 4 * stack_i as u64, value)?;
+                                stack_i += 1;
+                            }
+                            int_i += 1;
+                        }
+                        Slot::Float(value) => {
+                            if float_i < 16 {
+                                self.uc
+                                    .reg_write(
+                                        RegisterARM::D0 as i32 + float_i as i32,
+                                        value.to_bits(),
+                                    )
+                                    .map_err(|e| {
+                                        anyhow::anyhow!("cannot set float argument: {e}")
+                                    })?;
+                            } else {
+                                // The stack keeps doubles 8-byte aligned.
+                                let addr = (sp + 4 * stack_i as u64).next_multiple_of(8);
+                                write_bytes(&mut self.uc, addr, &value.to_le_bytes());
+                                stack_i += 2;
+                            }
+                            float_i += 1;
+                        }
                     }
                 }
                 self.uc
@@ -1050,17 +1173,83 @@ pub fn write_return(uc: &mut Uc<'_>, arch: Arch, value: u64) {
 }
 
 fn read_double(uc: &Uc<'_>, arch: Arch) -> Option<f64> {
-    let reg = match arch {
-        Arch::X86_64 => RegisterX86::XMM0 as i32,
-        Arch::Arm64 => RegisterARM64::D0 as i32,
-        Arch::X86 => RegisterX86::XMM0 as i32,
-        Arch::Arm => RegisterARM::D0 as i32,
-    };
-    let buf = uc.reg_read_long(reg).ok()?;
-    if buf.len() < 8 {
+    // The 32-bit x87 stack is not modelled, so there is nothing to read.
+    if arch == Arch::X86 {
         return None;
     }
-    Some(f64::from_le_bytes(buf[..8].try_into().ok()?))
+    Some(float_arg(uc, arch, 0, false))
+}
+
+/// A floating-point argument, by ABI.
+///
+/// Doubles and floats live in different registers than the integer arguments,
+/// so `arg_at` cannot reach them: x86-64 uses `xmm0..7` (a float in the low
+/// half), AArch64 uses `d0..7` (`s0..7` for a float), ARM32 the same. A bare
+/// Unicorn has no libm behind the import, which is why the math functions are
+/// answered here at all.
+pub(crate) fn float_arg(uc: &Uc<'_>, arch: Arch, index: usize, single: bool) -> f64 {
+    match arch {
+        Arch::X86_64 => {
+            let bytes = uc
+                .reg_read_long(RegisterX86::XMM0 as i32 + index as i32)
+                .unwrap_or_default();
+            if bytes.len() < 8 {
+                return 0.0;
+            }
+            if single {
+                f32::from_le_bytes(bytes[..4].try_into().unwrap()) as f64
+            } else {
+                f64::from_le_bytes(bytes[..8].try_into().unwrap())
+            }
+        }
+        Arch::Arm64 => {
+            // `reg_read_long` in the binding only sizes Q/V registers, so a
+            // `d` register is read through the `q` that contains it.
+            let bytes = uc
+                .reg_read_long(RegisterARM64::Q0 as i32 + index as i32)
+                .unwrap_or_default();
+            if bytes.len() < 8 {
+                return 0.0;
+            }
+            if single {
+                f32::from_le_bytes(bytes[..4].try_into().unwrap()) as f64
+            } else {
+                f64::from_le_bytes(bytes[..8].try_into().unwrap())
+            }
+        }
+        Arch::Arm => {
+            // ...and for 32-bit ARM it does not size anything at all, so the
+            // plain 64-bit read is used: d0..d31 and s0..s31 are each its own
+            // register, and the low half is what a single occupies.
+            let reg = if single {
+                RegisterARM::S0 as i32 + index as i32
+            } else {
+                RegisterARM::D0 as i32 + index as i32
+            };
+            match uc.reg_read(reg) {
+                Ok(bits) if single => f32::from_bits(bits as u32) as f64,
+                Ok(bits) => f64::from_bits(bits),
+                Err(_) => 0.0,
+            }
+        }
+        // 32-bit x86 passes floating point on the stack through x87, which is
+        // a different machine than the one being modelled here.
+        Arch::X86 => 0.0,
+    }
+}
+
+/// Put a floating-point result where the ABI expects it.
+pub(crate) fn set_float_return(uc: &mut Uc<'_>, arch: Arch, value: f64) {
+    let _ = match arch {
+        Arch::X86_64 => uc.reg_write_long(RegisterX86::XMM0 as i32, &value.to_le_bytes()),
+        Arch::Arm64 => {
+            let mut quad = [0u8; 16];
+            quad[..8].copy_from_slice(&value.to_le_bytes());
+            uc.reg_write_long(RegisterARM64::Q0 as i32, &quad)
+        }
+        Arch::Arm => uc.reg_write(RegisterARM::D0 as i32, value.to_bits()),
+        Arch::X86 => Ok(()),
+    };
 }
 
 /// Register name to unicorn id, per architecture. Names follow what a caller

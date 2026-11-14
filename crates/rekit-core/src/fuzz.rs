@@ -210,6 +210,7 @@ fn probe(path: &str, req: &Request) -> Result<String> {
         sysroot: None,
         harness: None,
         read_ranges: Vec::new(),
+        read_ret: 0,
         regs: Vec::new(),
         trace: false,
         stubs: req.stubs.clone(),

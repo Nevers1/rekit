@@ -98,6 +98,10 @@ struct RunArgs {
     #[arg(long = "read", value_name = "ADDR:SIZE:LABEL")]
     read_ranges: Vec<String>,
 
+    /// Read this many bytes at the returned pointer, e.g. `--read-ret 64`.
+    #[arg(long, value_name = "BYTES")]
+    read_ret: Option<usize>,
+
     /// Record executed instructions and print the first few.
     #[arg(long)]
     trace: bool,
@@ -262,6 +266,22 @@ fn parse_args(text: &str) -> Result<Vec<Arg>> {
             let value = rest.trim().trim_matches('"').to_string();
             out.push(Arg::Str(value));
             continue;
+        }
+        // `f:3` is a double that happens to be written without a point; a
+        // token that has one is a double on sight.
+        if let Some(rest) = token.strip_prefix("f:") {
+            let value = rest
+                .trim()
+                .parse::<f64>()
+                .with_context(|| format!("bad float argument {token}"))?;
+            out.push(Arg::Float(value));
+            continue;
+        }
+        if token.contains('.') || token.contains('e') || token.contains('E') {
+            if let Ok(value) = token.parse::<f64>() {
+                out.push(Arg::Float(value));
+                continue;
+            }
         }
         let value = if let Some(hex) = token
             .strip_prefix("0x")
@@ -429,6 +449,7 @@ fn run_one(args: RunArgs) -> Result<ExitCode> {
         trace: args.trace,
         regs: parse_regs(&args.regs),
         read_ranges: parse_reads(&args.read_ranges)?,
+        read_ret: args.read_ret.unwrap_or(0),
         overrides: parse_stubs(&args.stubs)?,
     };
 
@@ -579,6 +600,7 @@ fn sweep(args: SweepArgs) -> Result<ExitCode> {
             trace: false,
             regs: Vec::new(),
             read_ranges: Vec::new(),
+            read_ret: 0,
             overrides: stubs.clone(),
         };
         let mut machine = Machine::new(loaded, &opts)?;
@@ -693,6 +715,7 @@ fn probe(args: ProbeArgs) -> Result<ExitCode> {
                 trace: false,
                 regs: Vec::new(),
                 read_ranges: Vec::new(),
+                read_ret: 0,
                 overrides: HashMap::new(),
             };
             let mut machine = Machine::new(loaded, &opts)?;
@@ -761,6 +784,17 @@ fn probe(args: ProbeArgs) -> Result<ExitCode> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_double_argument_is_recognised_by_its_shape() {
+        let args = parse_args("3,3.5,f:7,1e9").unwrap();
+        assert!(matches!(args[0], Arg::Num(3)));
+        assert!(matches!(args[1], Arg::Float(v) if v == 3.5));
+        // `f:7` is a double written without a point, which the parser cannot
+        // guess at.
+        assert!(matches!(args[2], Arg::Float(v) if v == 7.0));
+        assert!(matches!(args[3], Arg::Float(v) if v == 1e9));
+    }
 
     #[test]
     fn splits_plain_arguments() {

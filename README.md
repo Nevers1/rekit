@@ -295,8 +295,11 @@ $ rekit emulate libbasic.so --symbol t_strlen --args 'str:"Hello, RE!"'
 return    0xa (10)
 ```
 
-The same works for AArch64, ARM and 32-bit PE. `--as-double` reads the result
-from the floating point register instead of the general purpose one.
+The same works for AArch64, ARM and 32-bit PE. An argument carries its type:
+`3` is an integer, `3.0` (or `f:3`) is a double, `str:...` is a pointer to a
+string on the emulated heap. `--as-double` reads the result from the floating
+point register instead of the general purpose one, so `t_hypot 3.0 4.0` answers
+`5` on both x86-64 and AArch64 without leaving Unicorn.
 
 ### Seeing inside the run
 
@@ -327,6 +330,17 @@ trace     0x40001223  sub rsp, 0x10
   global the function wrote, the stack. The label is optional. `0x…` and decimal
   both work, and a range that is not mapped is reported as such rather than
   failing the run.
+- `--read-ret 64` does the same at the returned pointer. A function that builds
+  a string, fills a struct or decrypts in place answers with an address, and
+  the address alone says nothing:
+
+  ```console
+  $ rekit emulate libbasic.so --symbol t_dup --read-ret 16
+  return    0x20000000 (536870912)
+  calls     strdup x1
+  read      ret 0x20000000 656d756c6174656420737472696e6700
+              |emulated string.|
+  ```
 - `--trace` records executed addresses and shows the first 24 disassembled, which
   is how "it stops at 0x401123" becomes "it takes the wrong branch after the
   compare".
@@ -381,32 +395,38 @@ Honest limits, because a wrong number is worse than no number:
   then emulate, or the sum will not match.
 - **Floating point on 32-bit ARM** (VFP/NEON) is not executable by Unicorn 2.1;
   use `--engine qemu` with `qemu-arm-static` and an ARM cross compiler, or
-  `r2` / `disasm` there.
+  `r2` / `disasm` there. On x86-64 and AArch64 floating point is fine, and the
+  libm imports are computed rather than reported missing.
 
 ### When Unicorn is the wrong engine
 
 Unicorn runs instructions; QEMU runs a program. For code that needs a real
-loader — AArch64 floating point, thread-local storage, constructors, a call into
-libc that Unicorn has no stub for — `--engine qemu` starts the function in a
-real process under `qemu-aarch64-static`, through a small harness that
-`dlopen`s the file and `dlsym`s the symbol.
+loader — thread-local storage, constructors, NEON on 32-bit ARM, a call that
+reaches into libc instead of through an import — `--engine qemu` starts the
+function in a real process under `qemu-aarch64-static`, through a small harness
+that `dlopen`s the file and `dlsym`s the symbol.
 
 ```console
-$ rekit emulate libbasic-arm64.so --symbol t_hypot --args 3,4 --as-double
+$ rekit emulate libbasic-arm64.so --symbol t_hypot --args 3.0,4.0 --as-double
 arch      arm64 / linux
-return    0x0 (0)
+return    0x0 (0) as double 5
 calls     hypot x1
-not implemented  hypot
 
-$ rekit emulate libbasic-arm64.so --symbol t_hypot --args 3,4 --as-double --engine qemu
+$ rekit emulate libbasic-arm64.so --symbol t_hypot --args 3.0,4.0 --as-double --engine qemu
 arch      aarch64 / linux
 engine    qemu (real process)
-target    t_hypot
 stop      returned
 return    5 (as double)
-qemu      /usr/bin/qemu-aarch64-static
 env       -L /usr/aarch64-linux-gnu ~/.cache/rekit/qemu/harness64-da30b53d libbasic-arm64.so t_hypot 3 4
 ```
+
+libm is answered inside Unicorn (`sqrt`, `pow`, `fmod`, `hypot`, `floor`,
+`sin`, and the `f` variants), and an argument carries its kind — `3` is an
+integer, `3.0` and `f:3` are doubles, `str:...` is a pointer — so a function
+taking both an `int` and a `double` gets each in the register its ABI names.
+What still needs the real process: VFP/NEON on 32-bit ARM, thread-local state,
+constructors, and a call that reaches deep into libc instead of through an
+import.
 
 The harness is built once with `aarch64-linux-gnu-gcc` and cached in
 `~/.cache/rekit/qemu` under a name that carries the hash of its source, so an

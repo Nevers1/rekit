@@ -57,6 +57,8 @@ pub struct Request {
     pub harness: Option<String>,
     /// Read memory after the run, `addr:size:label` entries.
     pub read_ranges: Vec<String>,
+    /// Read this many bytes at the returned pointer.
+    pub read_ret: usize,
     /// Registers to report after the run.
     pub regs: Vec<String>,
     /// Record executed instructions and show the head of the trace.
@@ -69,12 +71,15 @@ pub struct Request {
 
 pub fn run_request(req: &Request) -> Result<String> {
     let engine = req.engine.trim().to_ascii_lowercase();
-    let extras =
-        req.trace || !req.regs.is_empty() || !req.read_ranges.is_empty() || !req.stubs.is_empty();
+    let extras = req.trace
+        || !req.regs.is_empty()
+        || !req.read_ranges.is_empty()
+        || req.read_ret > 0
+        || !req.stubs.is_empty();
     if engine == "qemu" && extras {
         bail!(
-            "trace, regs, read_ranges and stubs only work with engine=unicorn: qemu runs a \
-             real process and rekit-emu cannot hook it"
+            "trace, regs, read_ranges, read_ret and stubs only work with engine=unicorn: \
+             qemu runs a real process and rekit-emu cannot hook it"
         );
     }
     if engine == "qemu" {
@@ -149,6 +154,10 @@ pub fn run_request(req: &Request) -> Result<String> {
     for range in &req.read_ranges {
         args.push("--read".into());
         args.push(range.clone());
+    }
+    if req.read_ret > 0 {
+        args.push("--read-ret".into());
+        args.push(req.read_ret.to_string());
     }
     for stub in &req.stubs {
         args.push("--stub".into());

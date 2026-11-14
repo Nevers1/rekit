@@ -16,22 +16,34 @@ skipped). The outputs are ignored by git.
 | `t_abs -5` | 5 |
 | `t_strlen "Hello, RE!"` | 10 |
 | `t_strcmp "abc" "abd"` | -1 |
-| `t_hypot 3 4` | 5.0 with `--as-double` (imports `hypot` from libm) |
+| `t_hypot 3.0 4.0` | 5.0 with `--as-double` (imports `hypot` from libm) |
+| `t_mix 3 2.5 "abcd"` | 9.5 with `--as-double` (int, double and pointer arguments) |
+| `t_math` | 44.5 with `--as-double` (every libm call the emulator answers) |
+| `t_dup` | a pointer to `"emulated string"`, shown by `--read-ret` |
 | `ad_probe` | **0** |
 
 `libbasic-arm64.so` (AArch64, Linux): same values, same zero from `ad_probe`.
-`t_hypot` is there for the engine choice: Unicorn has no `hypot` behind the
-import and answers 0 while saying so, and QEMU runs the real one:
+
+`t_hypot` used to be the engine-choice example — Unicorn answered 0 because it
+has no libm behind the import — and now it is the check that libm is answered
+in-process, on both architectures:
 
 ```console
-$ rekit emulate libbasic-arm64.so --symbol t_hypot --args 3,4 --as-double
-return    0x0 (0)
+$ rekit emulate libbasic-arm64.so --symbol t_hypot --args 3.0,4.0 --as-double
+return    0x0 (0) as double 5
 calls     hypot x1
-not implemented  hypot
-
-$ rekit emulate libbasic-arm64.so --symbol t_hypot --args 3,4 --as-double --engine qemu
-return    5 (as double)
 ```
+
+`engine=qemu` is still the fallback for what Unicorn cannot execute at all
+(VFP/NEON on ARM32, TLS, anything that reaches deep into libc).
+
+`--read-ret 16` on `t_dup` prints the string the returned pointer leads to,
+which is the difference between "it returned an address" and "it built this".
+
+Arguments carry their kind: `3` is an integer, `3.0` and `f:3` are doubles, and
+`str:...` is a pointer to a string on the emulated heap. Integer and
+floating-point arguments go to different registers, so `t_mix 3 2.5 "abcd"`
+returns 9.5 only if both landed where the ABI says.
 
 `win32.dll` / `win64.dll` (PE32 / PE32+):
 

@@ -7,8 +7,8 @@
 //! (`ptrace` returns 0, `TracerPid` is 0, no debugger is present).
 
 use crate::emu::{
-    arg_reg_ids, read_bytes, read_cstr, read_ptr, sp_reg_id, stack_arg_base, write_bytes,
-    write_u32, State, Stop, Uc, VarArgs, TLS_BASE,
+    arg_reg_ids, float_arg, read_bytes, read_cstr, read_ptr, set_float_return, sp_reg_id,
+    stack_arg_base, write_bytes, write_u32, State, Stop, Uc, VarArgs, TLS_BASE,
 };
 use crate::loader::{Arch, Platform};
 use crate::vfs;
@@ -55,6 +55,15 @@ pub fn call(uc: &mut Uc<'_>, st: &mut State, name: &str) -> u64 {
     let mut a = [0u64; 8];
     for (i, slot) in a.iter_mut().enumerate() {
         *slot = arg_at(uc, arch, platform, i);
+    }
+
+    // libm is answered here rather than left unimplemented: a bare Unicorn
+    // has no math library behind the import, and a float result that is
+    // silently zero is worse than one that is computed. `as_double` reads it
+    // back out of xmm0/d0.
+    if let Some(value) = math_value(uc, arch, name) {
+        set_float_return(uc, arch, value);
+        return 0;
     }
 
     match name {
@@ -219,6 +228,16 @@ pub fn call(uc: &mut Uc<'_>, st: &mut State, name: &str) -> u64 {
         //
         // Numbers
         //
+        "atof" | "strtod" | "strtof" | "strtold" => {
+            let text = astr(0, 1 << 16);
+            let start = text.len() - text.trim_start().len();
+            let (value, used) = parse_double(&text[start..]);
+            if a[1] != 0 && name.starts_with("strto") {
+                let _ = crate::emu::write_ptr(uc, arch, a[1], a[0] + (start + used) as u64);
+            }
+            set_float_return(uc, arch, value);
+            0
+        }
         "atoi" | "atol" | "atoll" => {
             let text = read_cstr(uc, a[0], 512);
             let (value, _) = parse_number(&text, 10);
@@ -745,6 +764,82 @@ pub fn call(uc: &mut Uc<'_>, st: &mut State, name: &str) -> u64 {
     }
 }
 
+/// Evaluate a libm call by name, or `None` when the name is not one.
+///
+/// A single-precision variant ends in `f` (`sqrtf`, `powf`), so the name is
+/// split rather than duplicated; the stems themselves never end in `f`.
+fn math_value(uc: &Uc<'_>, arch: Arch, name: &str) -> Option<f64> {
+    let single = name.ends_with('f');
+    let stem = name.trim_end_matches('f');
+    let a = |index: usize| float_arg(uc, arch, index, single);
+    let value = match stem {
+        "sqrt" => a(0).sqrt(),
+        "cbrt" => a(0).cbrt(),
+        "fabs" => a(0).abs(),
+        "floor" => a(0).floor(),
+        "ceil" => a(0).ceil(),
+        "round" => a(0).round(),
+        "trunc" => a(0).trunc(),
+        "sin" => a(0).sin(),
+        "cos" => a(0).cos(),
+        "tan" => a(0).tan(),
+        "asin" => a(0).asin(),
+        "acos" => a(0).acos(),
+        "atan" => a(0).atan(),
+        "sinh" => a(0).sinh(),
+        "cosh" => a(0).cosh(),
+        "tanh" => a(0).tanh(),
+        "exp" => a(0).exp(),
+        "exp2" => a(0).exp2(),
+        "expm1" => a(0).exp_m1(),
+        "log" => a(0).ln(),
+        "log2" => a(0).log2(),
+        "log10" => a(0).log10(),
+        "log1p" => a(0).ln_1p(),
+        "pow" => a(0).powf(a(1)),
+        "fmod" => a(0) % a(1),
+        "atan2" => a(0).atan2(a(1)),
+        "hypot" => a(0).hypot(a(1)),
+        "fmin" => a(0).min(a(1)),
+        "fmax" => a(0).max(a(1)),
+        "copysign" => a(0).copysign(a(1)),
+        "fdim" => (a(0) - a(1)).max(0.0),
+        "fma" => a(0).mul_add(a(1), a(2)),
+        _ => return None,
+    };
+    Some(value)
+}
+
+/// The longest numeric prefix of `text`, and how many bytes it took.
+fn parse_double(text: &str) -> (f64, usize) {
+    let mut end = 0;
+    let mut seen_dot = false;
+    let mut seen_exp = false;
+    for (index, ch) in text.char_indices() {
+        let ok = match ch {
+            '0'..='9' => true,
+            '+' | '-' => index == 0 || text[..index].ends_with(['e', 'E']),
+            '.' if !seen_dot && !seen_exp => {
+                seen_dot = true;
+                true
+            }
+            'e' | 'E' if !seen_exp => {
+                seen_exp = true;
+                true
+            }
+            _ => false,
+        };
+        if !ok {
+            break;
+        }
+        end = index + ch.len_utf8();
+    }
+    match text[..end].parse::<f64>() {
+        Ok(value) => (value, end),
+        Err(_) => (0.0, 0),
+    }
+}
+
 fn cmp_bytes(a: &[u8], b: &[u8]) -> i32 {
     let len = a.len().min(b.len());
     for i in 0..len {
@@ -1038,4 +1133,18 @@ fn format_bytes(uc: &Uc<'_>, _st: &mut State, fmt: &[u8], va: &mut VarArgs<'_, '
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_double_is_taken_from_its_longest_numeric_prefix() {
+        assert_eq!(parse_double("3.5").0, 3.5);
+        assert_eq!(parse_double("3.5").1, 3);
+        assert_eq!(parse_double("-1e3rest").0, -1000.0);
+        assert_eq!(parse_double("-1e3rest").1, 4);
+        assert_eq!(parse_double("abc"), (0.0, 0));
+    }
 }
