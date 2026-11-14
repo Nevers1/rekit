@@ -493,6 +493,61 @@ enum Command {
         #[arg(long)]
         body_only: bool,
     },
+    /// Load a page in headless Chrome and report what it did.
+    Browser {
+        url: String,
+        /// text | dom | html | title | eval | requests | console | cookies |
+        /// set-cookie | links | storage | screenshot | pdf | click | fill |
+        /// wait | snapshot
+        #[arg(long, default_value = "text")]
+        action: String,
+        /// action=eval: the JavaScript to run.
+        #[arg(long)]
+        js: Option<String>,
+        /// CSS selector for dom/text/click/fill/wait.
+        #[arg(long)]
+        selector: Option<String>,
+        /// action=fill: the text to put in the field.
+        #[arg(long)]
+        value: Option<String>,
+        /// CSS selector to wait for after loading.
+        #[arg(long)]
+        wait: Option<String>,
+        #[arg(long, default_value_t = 1366)]
+        width: u32,
+        #[arg(long, default_value_t = 900)]
+        height: u32,
+        /// Screenshot the whole page, not just the viewport.
+        #[arg(long)]
+        full_page: bool,
+        /// Where to write a screenshot or pdf.
+        #[arg(long)]
+        output: Option<String>,
+        #[arg(long, default_value_t = 30_000)]
+        timeout_ms: u64,
+        /// Extra header for every request: "Name: value"; repeatable.
+        #[arg(long = "header", value_name = "NAME: VALUE")]
+        headers: Vec<String>,
+        /// Cookie to set before loading: "name=value; domain=…"; repeatable.
+        #[arg(long = "cookie")]
+        cookies: Vec<String>,
+        #[arg(long)]
+        user_agent: Option<String>,
+        /// Attach to a running browser instead of starting one.
+        #[arg(long)]
+        cdp_url: Option<String>,
+        /// Show the window instead of running headless.
+        #[arg(long)]
+        headed: bool,
+        /// Keep the throwaway profile for inspection.
+        #[arg(long)]
+        keep_profile: bool,
+        /// Accept invalid TLS certificates.
+        #[arg(long)]
+        ignore_cert: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Analyze a memory dump through volatility3.
     Memdump {
         /// The dump (raw, vmem, dmp, core, lmp, lime), or archive::inner.
@@ -985,6 +1040,50 @@ fn main() -> Result<()> {
                 }),
             )?
         }
+        Command::Browser {
+            url,
+            action,
+            js,
+            selector,
+            value,
+            wait,
+            width,
+            height,
+            full_page,
+            output,
+            timeout_ms,
+            headers,
+            cookies,
+            user_agent,
+            cdp_url,
+            headed,
+            keep_profile,
+            ignore_cert,
+            json: as_json,
+        } => render(
+            "browser",
+            json!({
+                "url": url,
+                "action": action,
+                "js": js,
+                "selector": selector,
+                "value": value,
+                "wait": wait,
+                "width": width,
+                "height": height,
+                "full_page": full_page,
+                "output": output,
+                "timeout_ms": timeout_ms,
+                "headers": headers,
+                "cookies": cookies,
+                "user_agent": user_agent,
+                "cdp_url": cdp_url,
+                "headless": !headed,
+                "keep_profile": keep_profile,
+                "ignore_cert": ignore_cert,
+                "json": as_json,
+            }),
+        )?,
         Command::Memdump {
             path,
             plugin,

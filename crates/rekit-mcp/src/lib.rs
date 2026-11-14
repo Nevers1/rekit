@@ -490,6 +490,31 @@ pub fn tools() -> Value {
             }), &["url"])
         },
         {
+            "name": "browser",
+            "description": "Load a page in a real headless Chrome and report what it actually did. Static analysis says an endpoint exists in the bundle; this says which request fired on load, with which cookies and headers, what came back, what the DOM looks like after the framework hydrated, and what the console complained about. Actions: text (visible text), dom/html, title, eval (run JS), requests (the network table), console, cookies, set-cookie, links, storage, screenshot, pdf, click, fill, wait, snapshot (title + text + screenshot + first requests in one call). The browser gets a throwaway profile, so it never sees your cookies.",
+            "inputSchema": schema(json!({
+                "url": {"type": "string", "description": "http(s)://, data: or file:// url to open"},
+                "action": {"type": "string", "enum": ["text", "dom", "html", "title", "eval", "requests", "console", "cookies", "set-cookie", "links", "storage", "screenshot", "pdf", "click", "fill", "wait", "snapshot"], "description": "default text"},
+                "js": {"type": "string", "description": "action=eval: the expression to run in the page, awaited if it is a promise"},
+                "selector": {"type": "string", "description": "CSS selector for dom/text/click/fill/wait"},
+                "value": {"type": "string", "description": "action=fill: the text to put in the field, dispatched as input and change events"},
+                "wait": {"type": "string", "description": "CSS selector to wait for after loading, before the action runs"},
+                "width": {"type": "integer", "description": "viewport width, default 1366"},
+                "height": {"type": "integer", "description": "viewport height, default 900"},
+                "full_page": {"type": "boolean", "description": "screenshot the whole page, not just the viewport"},
+                "output": {"type": "string", "description": "file to write a screenshot or pdf to; a cache path when omitted"},
+                "timeout_ms": {"type": "integer", "description": "default 30000"},
+                "headers": {"type": "string", "description": "extra headers for every request the page makes: 'Authorization: Bearer …', comma separated"},
+                "cookies": {"type": "string", "description": "cookies to set before loading: 'name=value; domain=example.com; path=/'"},
+                "user_agent": {"type": "string", "description": "override the user agent"},
+                "cdp_url": {"type": "string", "description": "attach to a browser already running with --remote-debugging-port instead of starting one"},
+                "headless": {"type": "boolean", "description": "default true"},
+                "keep_profile": {"type": "boolean", "description": "keep the throwaway profile for inspection"},
+                "ignore_cert": {"type": "boolean", "description": "accept invalid TLS certificates, for staging hosts"},
+                "json": {"type": "boolean", "description": "return JSON instead of text"}
+            }), &["url"])
+        },
+        {
             "name": "memdump",
             "description": "Analyze a memory dump through volatility3: processes, sockets, command lines, open files, registry hives, shell history. Plugins are named as volatility names them (windows.pslist, windows.netscan, linux.bash). With no plugin it lists what this dump supports. A dump can come from an archive::inner spec like any other path.",
             "inputSchema": schema(json!({
@@ -999,6 +1024,30 @@ pub fn call_tool(name: &str, args: &Value) -> Result<String> {
             };
             web::http::run(&req)
         }
+        "browser" => {
+            let req = web::browser::Request {
+                url: str_arg(args, "url")?,
+                action: opt_str(args, "action").unwrap_or_else(|| "text".to_string()),
+                js: opt_str(args, "js"),
+                selector: opt_str(args, "selector"),
+                value: opt_str(args, "value"),
+                wait: opt_str(args, "wait"),
+                width: num_arg(args, "width", 1366) as u32,
+                height: num_arg(args, "height", 900) as u32,
+                full_page: bool_arg(args, "full_page", false),
+                output: opt_str(args, "output"),
+                timeout_ms: num_arg(args, "timeout_ms", 30_000),
+                headers: str_list(args, "headers"),
+                cookies: str_list(args, "cookies"),
+                user_agent: opt_str(args, "user_agent"),
+                cdp_url: opt_str(args, "cdp_url"),
+                headless: bool_arg(args, "headless", true),
+                keep_profile: bool_arg(args, "keep_profile", false),
+                ignore_cert: bool_arg(args, "ignore_cert", false),
+                json: bool_arg(args, "json", false),
+            };
+            web::browser::run(&req)
+        }
         "memdump" => {
             let req = core::memdump::Request {
                 path: str_arg(args, "path")?,
@@ -1372,7 +1421,7 @@ mod tests {
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted.len(), names.len());
-        assert_eq!(names.len(), 34);
+        assert_eq!(names.len(), 35);
     }
 
     #[test]

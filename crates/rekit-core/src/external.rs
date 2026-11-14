@@ -240,6 +240,30 @@ pub fn doctor() -> Vec<Tool> {
         })
         .collect();
 
+    // Any Chromium build is enough for `browser`, so the presence of one is
+    // reported once rather than as six missing commands.
+    const BROWSERS: &[&str] = &[
+        "google-chrome-stable",
+        "google-chrome",
+        "chromium",
+        "chromium-browser",
+        "brave",
+        "brave-browser",
+        "microsoft-edge",
+    ];
+    let browser = BROWSERS.iter().find(|exe| which(exe).is_some());
+    tools.push(Tool {
+        name: "chrome",
+        purpose: "the browser tool: what a page actually does",
+        found: browser.is_some(),
+        version: browser.and_then(|exe| {
+            run(exe, &["--version".to_string()], Duration::from_secs(5))
+                .ok()
+                .and_then(|out| out.lines().next().map(str::to_string))
+                .map(|line| line.trim().chars().take(70).collect())
+        }),
+    });
+
     for (name, purpose, at) in [
         (
             "ghidra",

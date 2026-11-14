@@ -146,6 +146,7 @@ paragraph in the system prompt.
 | `secrets` | Keys and tokens committed by accident, by shape and by entropy. Masked unless `reveal` is set. |
 | `jwt` | What a token claims, whether its signature is checked, and whether an HS secret falls to a wordlist. |
 | `http` | One request with method, headers, body, proxy and redirects, plus the curl that repeats it. |
+| `browser` | A real headless Chrome: what the page actually did — the DOM after scripts, the network table, the console, cookies, storage, a screenshot, a PDF. Click, fill, wait. |
 | `doctor` | Which external tools exist and their versions, so a missing dependency is explained. |
 
 ## CLI
@@ -190,6 +191,10 @@ rekit endpoints dist/app.js
 rekit secrets dist --min-severity high
 rekit jwt "$TOKEN" --wordlist rockyou.txt
 rekit http https://api.example.com/v2/login --method POST --json '{"user":"a","pass":"b"}'
+rekit browser https://app.example.com --action snapshot --output shot.png
+rekit browser https://app.example.com --action requests
+rekit browser https://app.example.com --action eval --js 'document.cookie'
+rekit browser https://app.example.com --action click --selector '#login' --js 'document.title'
 rekit doctor
 ```
 
@@ -630,6 +635,69 @@ redirect target named when there was one.
 These four are English like the rest of the output; the old plugin's Russian
 wording was translated so the reports read consistently.
 
+## A browser, for what the bundle cannot say
+
+Static analysis says an endpoint exists in the code. It cannot say which request
+fires on load, with which cookie, and what came back. That difference is where an
+access-control bug lives, so `browser` drives a real headless Chrome over the
+DevTools protocol:
+
+```console
+$ rekit browser https://app.example.com --action snapshot --output shot.png
+title     Sign in
+url       https://app.example.com/login?next=/dash
+shot      shot.png
+
+text
+  Sign in to continue
+  Email  Password  Continue
+
+requests
+  GET     200     12 kB Document  https://app.example.com/login?next=/dash
+  POST    401      211 B Fetch     https://app.example.com/api/v2/session
+  GET     200      38 kB Script    https://app.example.com/static/app.js
+```
+
+Every action is one call: `text`, `dom`/`html`, `title`, `eval` (run JS),
+`requests`, `console`, `cookies`, `set-cookie`, `links`, `storage`, `screenshot`,
+`pdf`, `click`, `fill`, `wait`, `snapshot`. `snapshot` is the summary — title,
+text, screenshot and the first requests — and is usually the one to start with.
+`click` and `fill` take a `--js` that runs *after* the interaction, so the answer
+to "what changed" is in the same call:
+
+```console
+$ rekit browser https://app.example.com --action click --selector '#login' --js 'location.pathname'
+/dash
+```
+
+Headers, cookies and a user agent can be set before the page loads, which is how
+a request is repeated with the token a bundle hardcoded:
+
+```console
+$ rekit browser https://app.example.com --action eval \
+    --header 'Authorization: Bearer eyJ…' --cookie 'sid=abc; domain=app.example.com' \
+    --js 'fetch("/api/v2/me").then(r => r.text())'
+```
+
+The browser is started with a throwaway profile under `~/.cache/rekit/chrome`,
+on a port it picks itself, and is killed on the way out — a page never sees the
+user's cookies, and nothing is left behind. `--headed` shows the window for the
+cases where a screenshot is not enough; `--cdp-url 9222` (or a full `ws://` url)
+attaches to a browser that is already running and leaves it running afterwards,
+which is the way to drive a multi-step flow across calls. `--keep-profile` keeps
+the profile for inspection, and `--ignore-cert` accepts a staging certificate.
+
+There is no WebSocket library and no async runtime: CDP is a handful of masked
+frames over TCP on `127.0.0.1`, so the client is about three hundred lines and
+the binary stays one file. Dialogs (`alert`, `confirm`) are accepted
+automatically — a page that greets you with `alert("debugger")` would otherwise
+block the renderer forever.
+
+What it does not do: Firefox (no CDP), TLS to a remote DevTools endpoint
+(`wss://` is refused), and it cannot see requests made before it attached.
+A page that keeps a connection open never fires `load`; that is reported as a
+timeout after the DOM is still read, rather than as a failure.
+
 ## Memory dumps
 
 A disk image and a RAM image answer different questions: the disk says what was
@@ -707,12 +775,13 @@ Honest scope for `0.1`.
   Android boot images. Nothing is executed and no external tool is needed.
 - **Disassembly, decompilation, carving, hooks, HTTP and memory are wrappers**
   around `llvm-objdump`, `r2`, `jadx`, `apktool`, `binwalk`, Ghidra, IDA,
-  `ilspycmd`, `javap`, `frida`, `curl` and volatility3. `doctor` reports what is
-  missing instead of failing later.
+  `ilspycmd`, `javap`, `frida`, `curl`, Chrome and volatility3. `doctor` reports
+  what is missing instead of failing later.
 - `--engine qemu` is a wrapper too, around qemu-user-static and a
   cross-compiled harness; it runs one function, not the program.
-- `endpoints`, `secrets` and `jwt` are pure Rust: no external tool, no network.
-  Only `http` leaves the machine, and only to the URL it was given.
+- `endpoints`, `secrets`, `jwt` and the DevTools client are pure Rust: no
+  external library, no TLS stack. Only `http` and `browser` leave the machine,
+  and only to the URL they were given.
 - DEX, JVM and .NET get format detection and offsets, not structure: use
   `decompile`, `javap` or `dotnet` for the readable view.
 - `ar`/`deb` payloads are recognised but not unpacked.
@@ -724,10 +793,12 @@ Honest scope for `0.1`.
 - JNI is answered, not executed: the environment is a table of pointers, so
   string round-trips and exception checks are real, but `Call*Method` returns 0
   because there is no Java object behind the reference.
-- The web tools read text, not behaviour: `endpoints` reports a route found in
-  a bundle, not whether it exists, and `secrets` reports a key by its shape — a
-  high-entropy string that is really a hash, or a live key that matches no
-  known shape, can still be wrong.
+- `endpoints` and `secrets` read text: a route found in a bundle is not proof
+  that it exists, and a key is reported by its shape — a high-entropy string
+  that is really a hash, or a live key that matches no known shape, can still be
+  wrong. `browser` answers the behavioural question, but one call is one page
+  load: a flow that spans several pages needs `--cdp-url` to attach and drive it
+  across calls.
 - `memdump` needs volatility3 and the symbol table for the image's kernel. It
   is a wrapper, not a parser: an image volatility cannot identify gets its
   requirement text back, and no attempt is made to guess a profile.

@@ -11,11 +11,14 @@
 //! `archive::inner` spec, because the interesting bundle is usually inside an
 //! APK or a zip.
 
+pub mod browser;
+pub mod cdp;
 pub mod endpoints;
 pub mod gather;
 pub mod http;
 pub mod jwt;
 pub mod secrets;
+pub mod ws;
 
 pub use gather::{cap, gather, Gathered, Src};
 
@@ -23,4 +26,23 @@ pub use gather::{cap, gather, Gathered, Src};
 /// only ever sees plain paths.
 pub fn resolve_spec(spec: &str) -> anyhow::Result<std::path::PathBuf> {
     rekit_core::resolve::resolve(spec)
+}
+
+/// Where rekit keeps things it has to write: extracted archives, decompiled
+/// sources, browser profiles.
+pub fn cache_dir(name: &str) -> std::path::PathBuf {
+    rekit_core::resolve::cache_root().join(name)
+}
+
+/// Look for an executable on PATH. `which` is a shell builtin on some systems
+/// and missing on others, so the lookup is done here.
+pub fn find_in_path(name: &str) -> Option<std::path::PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
 }
