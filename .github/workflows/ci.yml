@@ -19,7 +19,19 @@ jobs:
       - name: Build
         run: cargo build --locked --all-targets
       - name: Test
-        run: cargo test --locked
+        run: cargo test --locked 2>&1 | tee test.log
+      - name: Report failures
+        if: failure()
+        run: |
+          # Raw job logs need admin rights; annotations do not, so the failure
+          # is republished as ::error:: where it can actually be read.
+          grep -E "^---- |^thread '|^assertion|^test result: FAILED|^  left|^ right|^    [a-z_]+::" test.log \
+            | head -40 > failures.txt || true
+          while IFS= read -r line; do
+            line="${line//'%'/'%25'}"
+            line="${line//$'\r'/'%0D'}"
+            echo "::error title=test::$line"
+          done < failures.txt
       - name: MCP handshake
         shell: bash
         run: |
