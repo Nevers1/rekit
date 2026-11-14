@@ -118,6 +118,7 @@ pub fn doctor() -> Vec<Tool> {
         ("javap", "JVM bytecode"),
         ("ilspycmd", ".NET to C#"),
         ("binwalk", "embedded files and firmware carving"),
+        ("rasm2", "assembler behind the asm tool"),
         ("frida", "dynamic instrumentation scripts"),
         ("vol", "memory dumps"),
     ];

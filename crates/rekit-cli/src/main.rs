@@ -129,6 +129,38 @@ enum Command {
         #[arg(long)]
         expect: String,
     },
+    /// Assemble instructions into bytes, and optionally write them into the file.
+    Asm {
+        /// Instructions separated by `;` or newlines.
+        code: String,
+        /// Binary to take the architecture from; required with --patch.
+        #[arg(long)]
+        path: Option<String>,
+        #[arg(long)]
+        arch: Option<String>,
+        #[arg(long)]
+        bits: Option<u32>,
+        /// Assembly base address, which decides relative jumps.
+        #[arg(long, default_value = "0x1000")]
+        address: String,
+        /// Write the result into the file at --offset.
+        #[arg(long)]
+        patch: bool,
+        #[arg(long)]
+        offset: Option<String>,
+        #[arg(long)]
+        expect: Option<String>,
+    },
+    /// What changed between two builds of the same binary.
+    Diff {
+        old: String,
+        new: String,
+        /// summary | funcs | strings | full
+        #[arg(long, default_value = "summary")]
+        mode: String,
+        #[arg(long, default_value_t = 80)]
+        limit: usize,
+    },
     /// Call one function in a sandboxed CPU and print what it returns.
     Emulate {
         path: String,
@@ -256,6 +288,37 @@ fn main() -> Result<()> {
         } => render(
             "patch",
             json!({"path": path, "offset": offset, "bytes": bytes, "expect": expect}),
+        )?,
+        Command::Asm {
+            code,
+            path,
+            arch,
+            bits,
+            address,
+            patch,
+            offset,
+            expect,
+        } => render(
+            "asm",
+            json!({
+                "code": code,
+                "path": path,
+                "arch": arch,
+                "bits": bits,
+                "address": address,
+                "mode": if patch { "patch" } else { "asm" },
+                "offset": offset,
+                "expect": expect,
+            }),
+        )?,
+        Command::Diff {
+            old,
+            new,
+            mode,
+            limit,
+        } => render(
+            "diff",
+            json!({"old": old, "new": new, "mode": mode, "limit": limit}),
         )?,
         Command::Emulate {
             path,

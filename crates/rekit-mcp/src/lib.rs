@@ -281,6 +281,30 @@ pub fn tools() -> Value {
             }), &["path"])
         },
         {
+            "name": "asm",
+            "description": "Assemble instructions into machine code and optionally write them into the file. `mode=asm` returns the bytes; `mode=patch` writes them at an offset and, like `patch`, demands `expect` so a wrong offset is refused. The base address matters: `jmp 0x1005` assembles differently at 0x1000 and at 0x2000, so pass the address the code will run at. Architecture comes from `path` when given, otherwise from `arch`/`bits`.",
+            "inputSchema": schema(json!({
+                "code": {"type": "string", "description": "instructions separated by ';' or newlines, e.g. 'mov eax, 1; ret'"},
+                "path": {"type": "string", "description": "binary to take the architecture from; required for mode=patch"},
+                "arch": {"type": "string", "description": "x86 | aarch64 | arm | mips, when no path is given"},
+                "bits": {"type": "integer", "description": "32 or 64, when no path is given"},
+                "address": {"type": "string", "description": "assembly base address for relative jumps, default 0x1000"},
+                "mode": {"type": "string", "description": "asm (bytes only) | patch (write into the file)"},
+                "offset": {"type": "string", "description": "mode=patch: file offset"},
+                "expect": {"type": "string", "description": "mode=patch: hex bytes that must be there now"}
+            }), &["code"])
+        },
+        {
+            "name": "diff",
+            "description": "Compare two builds of the same binary: added, removed, changed and merely moved functions, plus new and gone strings. Functions are matched by name, and by instruction structure when names are stripped, so a code shift does not look like a change. Use it to answer 'what did the update actually change'.",
+            "inputSchema": schema(json!({
+                "old": {"type": "string"},
+                "new": {"type": "string"},
+                "mode": {"type": "string", "description": "summary (default) | funcs | strings | full"},
+                "limit": {"type": "integer", "description": "how many lines per section, default 80"}
+            }), &["old", "new"])
+        },
+        {
             "name": "doctor",
             "description": "Which external tools are installed (r2, jadx, apktool, ilspycmd, binwalk, frida, vol) and their versions. Call this when a wrapper tool reports a missing dependency.",
             "inputSchema": schema(json!({}), &[])
@@ -415,6 +439,72 @@ pub fn call_tool(name: &str, args: &Value) -> Result<String> {
                 opt_str(args, "filter").as_deref(),
                 args.get("json").and_then(Value::as_bool).unwrap_or(false),
             )
+        }
+        "asm" => {
+            let code = str_arg(args, "code")?;
+            let mode = opt_str(args, "mode").unwrap_or_else(|| "asm".to_string());
+            let address = match args.get("address") {
+                None | Some(Value::Null) => 0x1000,
+                Some(v) => v
+                    .as_u64()
+                    .or_else(|| v.as_str().and_then(parse_number))
+                    .ok_or_else(|| anyhow!("address must be a number or a hex string"))?,
+            };
+            let arch = opt_str(args, "arch");
+            let bits = args.get("bits").and_then(Value::as_u64).map(|n| n as u32);
+
+            if mode == "patch" {
+                let path = opt_str(args, "path").ok_or_else(|| {
+                    anyhow!("mode=patch needs path: it names both the target and the architecture")
+                })?;
+                let offset = match args.get("offset") {
+                    None | Some(Value::Null) => {
+                        bail!("mode=patch needs offset: where in the file to write")
+                    }
+                    Some(v) => v
+                        .as_u64()
+                        .or_else(|| v.as_str().and_then(parse_number))
+                        .ok_or_else(|| anyhow!("offset must be a number or a hex string"))?,
+                };
+                let expect = opt_str(args, "expect");
+                let res = core::asm::assemble_and_patch(
+                    &path,
+                    &code,
+                    arch.as_deref(),
+                    bits,
+                    address,
+                    offset,
+                    expect.as_deref(),
+                )?;
+                Ok(format!(
+                    "assembled {}\nwritten   {} at 0x{:x}: {} -> {} ({} bytes)\n",
+                    line_for(&res.assembly),
+                    res.patch.path,
+                    res.patch.offset,
+                    res.patch.before,
+                    res.patch.after,
+                    res.patch.size
+                ))
+            } else {
+                let (arch, bits) = match opt_str(args, "path") {
+                    Some(path) => {
+                        let info = core::analyze(&path)?;
+                        (arch.unwrap_or(info.arch), bits.unwrap_or(info.bits))
+                    }
+                    None => (
+                        arch.unwrap_or_else(|| "x86".to_string()),
+                        bits.unwrap_or(64),
+                    ),
+                };
+                let res = core::asm::assemble(&code, &arch, bits, address)?;
+                Ok(format!("{}\n", line_for(&res)))
+            }
+        }
+        "diff" => {
+            let report = core::diff::compare(&str_arg(args, "old")?, &str_arg(args, "new")?)?;
+            let mode = opt_str(args, "mode").unwrap_or_else(|| "summary".to_string());
+            let limit = (num_arg(args, "limit", 80) as usize).clamp(1, 5_000);
+            Ok(core::diff::render(&report, &mode, limit))
         }
         "doctor" => render_doctor(),
         other => bail!("unknown tool {other:?}"),
@@ -616,6 +706,13 @@ fn render_scan(path: &str, kind: &str, limit: usize) -> Result<String> {
     Ok(out)
 }
 
+fn line_for(a: &core::asm::Assembly) -> String {
+    format!(
+        "arch      {}/{}   address {:#x}\ncode      {} instructions, {} bytes\nbytes     {}\n",
+        a.arch, a.bits, a.address, a.instructions, a.length, a.spaced
+    )
+}
+
 fn render_doctor() -> Result<String> {
     let tools = core::external::doctor();
     let mut out = String::new();
@@ -677,7 +774,7 @@ mod tests {
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted.len(), names.len());
-        assert_eq!(names.len(), 19);
+        assert_eq!(names.len(), 21);
     }
 
     #[test]

@@ -5,7 +5,9 @@
 //! case. Parsing failures degrade to magic-byte detection instead of errors.
 
 pub mod antidebug;
+pub mod asm;
 pub mod axml;
+pub mod diff;
 pub mod emulate;
 pub mod entropy;
 pub mod external;
