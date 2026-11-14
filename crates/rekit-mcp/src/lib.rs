@@ -207,11 +207,16 @@ pub fn tools() -> Value {
         },
         {
             "name": "scan",
-            "description": "Two scans in one. kind=const finds crypto constants (AES S-box, SHA-256 K, ChaCha sigma, Base64 alphabet) with offsets; kind=apis groups imports into anti/crypto/net/mem/priv. kind=all returns both.",
+            "description": "Three scans in one, no decompilation needed. kind=const: with `value` it finds where your constant sits in the code (both byte orders, naming the function when rabin2 knows one), without it it reports known crypto constants (AES S-box, SHA-256 K, ChaCha sigma, Base64 alphabet). kind=apis groups imports into anti/crypto/net/mem/file/procmem/ui/priv/other. kind=probe calls every exported function once with a trial argument and shows which return something — the quickest way to find where the interesting code is. kind=all does const and apis.",
             "inputSchema": schema(json!({
                 "path": {"type": "string"},
-                "kind": {"type": "string", "enum": ["const", "apis", "all"], "description": "default all"},
-                "limit": {"type": "integer", "description": "default 50 constants"}
+                "kind": {"type": "string", "enum": ["const", "apis", "probe", "all"], "description": "default all"},
+                "value": {"type": "string", "description": "kind=const: the constant to find, e.g. 0xDEADBEEF, 1234 or 0x5A,0x5B"},
+                "width": {"type": "integer", "description": "kind=const: how many bytes the constant occupies, default 4"},
+                "category": {"type": "string", "description": "kind=apis: only this group (anti, crypto, net, mem, file, procmem, ui, priv)"},
+                "arg": {"type": "string", "description": "kind=probe: trial argument, default 1"},
+                "limit": {"type": "integer", "description": "default 50"},
+                "json": {"type": "boolean", "description": "kind=probe: print the emulator's own JSON"}
             }), &["path"])
         },
         {
@@ -360,6 +365,10 @@ pub fn tools() -> Value {
                 "engine": {"type": "string", "enum": ["unicorn", "qemu"], "description": "unicorn (default) executes the code in a sandbox; qemu runs a real process, which is the only way to run AArch64 floating point, TLS and constructors"},
                 "sysroot": {"type": "string", "description": "qemu: target sysroot for the dynamic loader, e.g. /usr/aarch64-linux-gnu"},
                 "harness": {"type": "string", "description": "qemu: a prebuilt harness instead of the cached one"},
+                "regs": {"type": "string", "description": "registers to report after the run, e.g. 'rax,rdi' or 'x0,x1'"},
+                "read_ranges": {"type": "string", "description": "memory to read back after the run: 'addr:size:label', comma separated. This is how you see what the function decrypted into a buffer"},
+                "trace": {"type": "boolean", "description": "record executed instructions and show the first 24 disassembled; use it to see where a check actually goes"},
+                "stubs": {"type": "string", "description": "answer an address with an import call: '0x401040=strlen' or '0x401040=strlen:32' to force the value. Lets a static binary be emulated without its import table"},
                 "json": {"type": "boolean", "description": "return the raw report instead of a summary"}
             }), &["path"])
         },
@@ -394,6 +403,7 @@ pub fn tools() -> Value {
                 "limit": {"type": "integer", "description": "max runs (default 500)"},
                 "vfs": {"type": "boolean", "description": "answer file reads with a fake /proc (default true)"},
                 "thumb": {"type": "boolean", "description": "target is Thumb code (ARM only)"},
+                "stubs": {"type": "string", "description": "answer an address with an import call: '0x401040=strlen[:ret]'"},
                 "json": {"type": "boolean", "description": "return the emulator's raw JSON"}
             }), &["path"])
         },
@@ -610,9 +620,34 @@ pub fn call_tool(name: &str, args: &Value) -> Result<String> {
         }
         "scan" => {
             let path = str_arg(args, "path")?;
-            let kind = opt_str(args, "kind").unwrap_or_else(|| "all".to_string());
-            let limit = num_arg(args, "limit", 50) as usize;
-            render_scan(&path, &kind, limit)
+            let kind = opt_str(args, "kind")
+                .or_else(|| opt_str(args, "mode"))
+                .unwrap_or_else(|| "all".to_string());
+            let limit = (num_arg(args, "limit", 50) as usize).clamp(1, 5_000);
+            match kind.as_str() {
+                "const" => match opt_str(args, "value") {
+                    Some(value) => {
+                        let width = num_arg(args, "width", 4) as usize;
+                        core::scan::const_value(&path, &value, width, limit)
+                    }
+                    None => render_consts(&path, limit),
+                },
+                "apis" => render_apis(&path, opt_str(args, "category").as_deref(), limit),
+                "probe" => core::scan::probe(
+                    &path,
+                    &opt_str(args, "arg").unwrap_or_else(|| "1".to_string()),
+                    limit,
+                    args.get("json").and_then(Value::as_bool).unwrap_or(false),
+                ),
+                "all" => {
+                    let mut out = render_consts(&path, limit)?;
+                    out.push_str(&render_apis(&path, None, limit)?);
+                    Ok(out)
+                }
+                other => bail!(
+                    "unknown kind {other:?}: const (with or without value), apis, probe or all"
+                ),
+            }
         }
         "archive" => render_archive(&str_arg(args, "path")?),
         "disasm" => {
@@ -779,6 +814,7 @@ pub fn call_tool(name: &str, args: &Value) -> Result<String> {
                 limit: num_arg(args, "limit", 500) as usize,
                 vfs: args.get("vfs").and_then(Value::as_bool).unwrap_or(true),
                 thumb: args.get("thumb").and_then(Value::as_bool).unwrap_or(false),
+                stubs: str_list(args, "stubs"),
                 json: args.get("json").and_then(Value::as_bool).unwrap_or(false),
             };
             core::fuzz::run(&req)
@@ -809,6 +845,10 @@ pub fn call_tool(name: &str, args: &Value) -> Result<String> {
                 engine: opt_str(args, "engine").unwrap_or_else(|| "unicorn".to_string()),
                 sysroot: opt_str(args, "sysroot"),
                 harness: opt_str(args, "harness"),
+                read_ranges: str_list(args, "read_ranges"),
+                regs: str_list(args, "regs"),
+                trace: args.get("trace").and_then(Value::as_bool).unwrap_or(false),
+                stubs: str_list(args, "stubs"),
                 json: args.get("json").and_then(Value::as_bool).unwrap_or(false),
             };
             core::emulate::run_request(&req)
@@ -992,6 +1032,26 @@ fn num_arg(args: &Value, key: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
+/// A list argument: either a JSON array of strings or one comma separated
+/// string, since both read naturally in a tool call and the old plugin used
+/// the comma form.
+fn str_list(args: &Value, key: &str) -> Vec<String> {
+    match args.get(key) {
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect(),
+        Some(Value::String(text)) => text
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 fn parse_number(s: &str) -> Option<u64> {
     let s = s.trim();
     match s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
@@ -1161,28 +1221,35 @@ fn render_antidebug(path: &str, limit: usize) -> Result<String> {
     Ok(out)
 }
 
-fn render_scan(path: &str, kind: &str, limit: usize) -> Result<String> {
-    let mut out = String::new();
-    if kind == "const" || kind == "all" {
-        let hits = core::scan::consts(path, limit)?;
-        out.push_str(&format!("constants: {}\n", hits.len()));
-        for hit in &hits {
-            out.push_str(&format!("  0x{:08x}  {}\n", hit.offset, hit.name));
-        }
+fn render_consts(path: &str, limit: usize) -> Result<String> {
+    let hits = core::scan::consts(path, limit)?;
+    let mut out = format!("known crypto constants: {}\n", hits.len());
+    for hit in &hits {
+        out.push_str(&format!("  0x{:08x}  {}\n", hit.offset, hit.name));
     }
-    if kind == "apis" || kind == "all" {
-        let apis = core::scan::apis(path)?;
-        if apis.is_empty() {
-            out.push_str("apis: no interesting imports\n");
+    Ok(out)
+}
+
+fn render_apis(path: &str, category: Option<&str>, limit: usize) -> Result<String> {
+    let apis = core::scan::apis(path, category)?;
+    if apis.is_empty() {
+        return Ok(format!(
+            "apis: nothing{} matches — the binary may have no imports, or be stripped\n",
+            match category {
+                Some(category) => format!(" in {category}"),
+                None => String::new(),
+            }
+        ));
+    }
+    let mut out = String::new();
+    let per_group = limit.min(40);
+    for (group, names) in &apis {
+        out.push_str(&format!("apis/{group} ({})\n", names.len()));
+        for name in names.iter().take(per_group) {
+            out.push_str(&format!("  {name}\n"));
         }
-        for (category, names) in &apis {
-            out.push_str(&format!("apis/{category} ({})\n", names.len()));
-            for name in names.iter().take(40) {
-                out.push_str(&format!("  {name}\n"));
-            }
-            if names.len() > 40 {
-                out.push_str(&format!("  ... {} more\n", names.len() - 40));
-            }
+        if names.len() > per_group {
+            out.push_str(&format!("  ... {} more\n", names.len() - per_group));
         }
     }
     Ok(out)

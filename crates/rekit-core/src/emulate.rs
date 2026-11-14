@@ -55,12 +55,28 @@ pub struct Request {
     pub sysroot: Option<String>,
     /// qemu: a prebuilt harness instead of the cached one.
     pub harness: Option<String>,
+    /// Read memory after the run, `addr:size:label` entries.
+    pub read_ranges: Vec<String>,
+    /// Registers to report after the run.
+    pub regs: Vec<String>,
+    /// Record executed instructions and show the head of the trace.
+    pub trace: bool,
+    /// Answer an address with an import call, `addr=name[:ret]`.
+    pub stubs: Vec<String>,
     /// Return the raw JSON report instead of the rendered summary.
     pub json: bool,
 }
 
 pub fn run_request(req: &Request) -> Result<String> {
     let engine = req.engine.trim().to_ascii_lowercase();
+    let extras =
+        req.trace || !req.regs.is_empty() || !req.read_ranges.is_empty() || !req.stubs.is_empty();
+    if engine == "qemu" && extras {
+        bail!(
+            "trace, regs, read_ranges and stubs only work with engine=unicorn: qemu runs a \
+             real process and rekit-emu cannot hook it"
+        );
+    }
     if engine == "qemu" {
         // QEMU runs a real process, so it needs a real file rather than a
         // member name, and it formats its own answer.
@@ -120,6 +136,23 @@ pub fn run_request(req: &Request) -> Result<String> {
     }
     if req.thumb {
         args.push("--thumb".into());
+    }
+    if req.trace {
+        args.push("--trace".into());
+    }
+    if !req.regs.is_empty() {
+        args.push("--regs".into());
+        args.push(req.regs.join(","));
+    }
+    // One flag per range rather than a joined list: the label may itself
+    // contain a comma, and the sidecar splits each value on its own.
+    for range in &req.read_ranges {
+        args.push("--read".into());
+        args.push(range.clone());
+    }
+    for stub in &req.stubs {
+        args.push("--stub".into());
+        args.push(stub.clone());
     }
 
     // The emulator enforces its own deadline; this is only a backstop for a
@@ -199,6 +232,61 @@ fn render(report: &Value) -> String {
     if let Some(output) = report.get("output").and_then(Value::as_str) {
         if !output.trim().is_empty() {
             out.push_str(&format!("output    {}\n", output.trim_end()));
+        }
+    }
+    for (name, value) in report
+        .get("regs")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+    {
+        out.push_str(&format!(
+            "reg       {name} {}\n",
+            value.as_str().unwrap_or("?")
+        ));
+    }
+    for read in report
+        .get("reads")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let label = read.get("label").and_then(Value::as_str).unwrap_or("?");
+        let addr = read.get("addr").and_then(Value::as_str).unwrap_or("?");
+        match read.get("hex").and_then(Value::as_str) {
+            Some(hex) => {
+                out.push_str(&format!("read      {label} {addr} {hex}\n"));
+                if let Some(ascii) = read.get("ascii").and_then(Value::as_str) {
+                    out.push_str(&format!("            |{ascii}|\n"));
+                }
+            }
+            None => {
+                let error = read
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unreadable");
+                out.push_str(&format!("read      {label} {addr} {error}\n"));
+            }
+        }
+    }
+    for line in report
+        .get("disasm")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if let Some(line) = line.as_str() {
+            out.push_str(&format!("trace     {line}\n"));
+        }
+    }
+    for line in report
+        .get("overrides")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if let Some(line) = line.as_str() {
+            out.push_str(&format!("stub      {line}\n"));
         }
     }
     for note in report

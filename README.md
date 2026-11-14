@@ -291,6 +291,59 @@ return    0xa (10)
 The same works for AArch64, ARM and 32-bit PE. `--as-double` reads the result
 from the floating point register instead of the general purpose one.
 
+### Seeing inside the run
+
+The return value is one number. When the number is not the answer — a check that
+fails for the wrong reason, a decryption whose output you want — the run can
+report what it left behind:
+
+```console
+$ rekit emulate libbasic.so --symbol t_fmt --args 0x20001000,32 \
+    --regs rax,rdi --read '0x20001000:32:buf' --trace
+arch      x86_64 / linux
+target    t_fmt at 0x4000121f
+stop      returned
+return    0x6 (6)
+calls     snprintf x1
+reg       rax 0x6
+reg       rdi 0x20001000
+read      buf 0x20001000 6162632d34320000…
+            |abc-42..........|
+trace     0x4000121f  push rbp
+trace     0x40001220  mov rbp, rsp
+trace     0x40001223  sub rsp, 0x10
+```
+
+- `--regs rax,rdi` reads registers **after** the function returns. Names are the
+  ones from the disassembly: `rax`, `eax`, `x0`, `r7`, `sp`, `pc`, `lr`.
+- `--read addr:size:label` reads memory after the run — a decryption buffer, a
+  global the function wrote, the stack. The label is optional. `0x…` and decimal
+  both work, and a range that is not mapped is reported as such rather than
+  failing the run.
+- `--trace` records executed addresses and shows the first 24 disassembled, which
+  is how "it stops at 0x401123" becomes "it takes the wrong branch after the
+  compare".
+
+For code with no import table to rewrite — a static binary, a function copied
+out of a packer — `--stub addr=name[:ret]` says what an address *is*:
+
+```console
+$ rekit emulate libbasic.so --symbol t_strlen --args 'str:hello' \
+    --stub '0x40001050=strlen:3'
+return    0x3 (3)
+calls     strlen x1
+stub      strlen -> 0x3 (forced)
+```
+
+The address is answered as if it were a call to that import: arguments are read
+per the ABI, a real `strlen` is computed, and `:ret` replaces the result. A
+forced value is **ignored** for allocators and file openers (`malloc`, `calloc`,
+`fopen`, …) and the report says so — returning 0 from `malloc` would make the
+guest dereference NULL, which is never what "pretend it succeeded" means.
+
+`fuzz` takes the same `--stub`, so one sweep can run against a binary whose
+calls were never linked.
+
 ### What emulation cannot do
 
 Honest limits, because a wrong number is worse than no number:

@@ -31,6 +31,12 @@ pub const TLS_BASE: u64 = 0x2800_0000;
 
 pub const STACK_SIZE: u64 = 0x0010_0000;
 
+/// How many trace addresses to keep. A trace is for reading the start of a
+/// function, not for reconstructing a million instructions.
+const TRACE_KEEP: usize = 4096;
+/// How many of them to disassemble for the report.
+const TRACE_SHOWN: usize = 24;
+
 #[derive(Clone, Debug)]
 pub enum Arg {
     Num(u64),
@@ -97,6 +103,12 @@ pub struct State {
     pub jni_strings: HashMap<u64, String>,
     /// The JNIEnv note is worth printing once, not once per call.
     pub jni_noted: bool,
+    /// Every instruction address, when tracing was asked for.
+    pub trace: Vec<u64>,
+    /// Addresses whose import the caller overrode.
+    pub overrides: HashMap<u64, Override>,
+    /// What happened to those overrides: applied, or ignored and why.
+    pub override_notes: Vec<String>,
 }
 
 impl State {
@@ -131,6 +143,9 @@ impl State {
             jni_objects: HashMap::new(),
             jni_strings: HashMap::new(),
             jni_noted: false,
+            trace: Vec::new(),
+            overrides: HashMap::new(),
+            override_notes: Vec::new(),
         }
     }
 
@@ -267,7 +282,76 @@ pub struct Report {
     /// Where execution hit unmapped memory, when it did.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fault: Option<Fault>,
+    /// Registers asked for with `--regs`, name to hex value.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub regs: std::collections::BTreeMap<String, String>,
+    /// Memory read back after the run: the buffer a function decrypted into.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub reads: Vec<Readout>,
+    /// First instructions of the trace, disassembled.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub disasm: Vec<String>,
+    /// Forced returns that were applied, and any that were ignored because the
+    /// stub has to hand back a usable pointer.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub overrides: Vec<String>,
     pub elapsed_ms: u64,
+}
+
+/// One `--read addr:size:label` answered after the run.
+#[derive(serde::Serialize)]
+pub struct Readout {
+    pub label: String,
+    pub addr: String,
+    pub size: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hex: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ascii: Option<String>,
+    /// Set when the range was not mapped or ran off the end of memory.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// A read to perform once the function has returned.
+#[derive(Clone, Debug)]
+pub struct ReadRange {
+    pub addr: u64,
+    pub size: usize,
+    pub label: String,
+}
+
+/// An import call the caller wants to answer itself.
+///
+/// `ret` is the value to hand back instead of the stub's own answer. It is
+/// honoured for anything that computes a value, and ignored for allocators and
+/// file openers: returning 0 from `malloc` makes the caller dereference NULL,
+/// which is never what "pretend this succeeded" means.
+#[derive(Clone, Debug)]
+pub struct Override {
+    pub name: String,
+    pub ret: Option<u64>,
+}
+
+impl Override {
+    fn ret_applies(&self) -> bool {
+        !matches!(
+            self.name.to_ascii_lowercase().as_str(),
+            "malloc"
+                | "calloc"
+                | "realloc"
+                | "valloc"
+                | "memalign"
+                | "aligned_alloc"
+                | "strdup"
+                | "strndup"
+                | "fopen"
+                | "fdopen"
+                | "tmpfile"
+                | "open"
+                | "openat"
+        )
+    }
 }
 
 pub struct Options {
@@ -276,6 +360,14 @@ pub struct Options {
     pub vfs: bool,
     pub as_double: bool,
     pub thumb: bool,
+    /// Record every executed address, and disassemble the first few.
+    pub trace: bool,
+    /// Registers to report after the run.
+    pub regs: Vec<String>,
+    /// Memory to read after the run.
+    pub read_ranges: Vec<ReadRange>,
+    /// Address to import call, replacing whatever the loader wired there.
+    pub overrides: HashMap<u64, Override>,
 }
 
 impl Default for Options {
@@ -286,6 +378,10 @@ impl Default for Options {
             vfs: true,
             as_double: false,
             thumb: false,
+            trace: false,
+            regs: Vec::new(),
+            read_ranges: Vec::new(),
+            overrides: HashMap::new(),
         }
     }
 }
@@ -297,7 +393,8 @@ pub struct Machine {
 }
 
 impl Machine {
-    pub fn new(loaded: Loaded, vfs: bool) -> Result<Self> {
+    pub fn new(loaded: Loaded, opts: &Options) -> Result<Self> {
+        let vfs = opts.vfs;
         let (ucarch, mode) = match loaded.arch {
             Arch::X86_64 => (UcArch::X86, Mode::LITTLE_ENDIAN | Mode::MODE_64),
             Arch::X86 => (UcArch::X86, Mode::LITTLE_ENDIAN | Mode::MODE_32),
@@ -321,6 +418,7 @@ impl Machine {
         map_region(&mut uc, stack_base, STACK_SIZE)?;
 
         let st = Rc::new(RefCell::new(State::new(&loaded, vfs)));
+        st.borrow_mut().overrides = opts.overrides.clone();
 
         // Fill import slots and relocations, creating one stub per unique name.
         let mut stubs: HashMap<String, u64> = HashMap::new();
@@ -379,6 +477,18 @@ impl Machine {
                 },
             )
             .map_err(|e| anyhow::anyhow!("cannot hook stubs: {e}"))?;
+        }
+        // The trace and address overrides need to see every instruction, which
+        // costs a callback each time — so the hook is only installed when one of
+        // them was asked for. Stub addresses are left to `on_stub`: it owns the
+        // dispatch there, and two hooks answering one call would answer twice.
+        if opts.trace || !opts.overrides.is_empty() {
+            let st2 = Rc::clone(&st);
+            let arch = loaded.arch;
+            uc.add_code_hook(1, 0, move |uc, addr, _| {
+                on_any(uc, &st2, arch, addr);
+            })
+            .map_err(|e| anyhow::anyhow!("cannot hook instructions: {e}"))?;
         }
         {
             let st2 = Rc::clone(&st);
@@ -495,6 +605,15 @@ impl Machine {
             Stop::Fault => "fault",
             Stop::Running => "running",
         };
+        // Read the extras while the machine is still alive: after this the
+        // memory is gone.
+        let regs = read_regs(&self.uc, arch, &opts.regs);
+        let reads = read_out(&self.uc, &opts.read_ranges);
+        let disasm = if opts.trace {
+            disassemble(&self.uc, arch, &state.trace, TRACE_SHOWN, opts.thumb)
+        } else {
+            Vec::new()
+        };
         Ok(Report {
             ok: state.stop == Stop::Returned,
             arch: arch.name().to_string(),
@@ -521,6 +640,10 @@ impl Machine {
             files: state.files.iter().map(|f| f.path.clone()).collect(),
             notes: state.notes.clone(),
             fault: state.fault.clone(),
+            regs,
+            reads,
+            disasm,
+            overrides: state.override_notes.clone(),
             elapsed_ms: begin.elapsed().as_millis() as u64,
         })
     }
@@ -882,6 +1005,215 @@ fn read_double(uc: &Uc<'_>, arch: Arch) -> Option<f64> {
     Some(f64::from_le_bytes(buf[..8].try_into().ok()?))
 }
 
+/// Register name to unicorn id, per architecture. Names follow what a caller
+/// would type after looking at the disassembly (`rax`, `x0`, `r7`), not the
+/// emulator's internal numbering.
+fn reg_id(arch: Arch, name: &str) -> Option<i32> {
+    let name = name.trim().trim_start_matches('%').to_ascii_lowercase();
+    match arch {
+        Arch::X86_64 => {
+            let id = match name.as_str() {
+                "rax" => RegisterX86::RAX,
+                "rbx" => RegisterX86::RBX,
+                "rcx" => RegisterX86::RCX,
+                "rdx" => RegisterX86::RDX,
+                "rsi" => RegisterX86::RSI,
+                "rdi" => RegisterX86::RDI,
+                "rbp" => RegisterX86::RBP,
+                "rsp" => RegisterX86::RSP,
+                "rip" | "pc" => RegisterX86::RIP,
+                "eflags" => RegisterX86::EFLAGS,
+                _ => {
+                    let n = name.strip_prefix('r')?.parse::<u8>().ok()?;
+                    let base = RegisterX86::R8 as i32;
+                    if !(8..=15).contains(&n) {
+                        return None;
+                    }
+                    return Some(base + (n as i32 - 8));
+                }
+            };
+            Some(id as i32)
+        }
+        Arch::X86 => {
+            let id = match name.as_str() {
+                "eax" => RegisterX86::EAX,
+                "ebx" => RegisterX86::EBX,
+                "ecx" => RegisterX86::ECX,
+                "edx" => RegisterX86::EDX,
+                "esi" => RegisterX86::ESI,
+                "edi" => RegisterX86::EDI,
+                "ebp" => RegisterX86::EBP,
+                "esp" => RegisterX86::ESP,
+                "eip" | "pc" => RegisterX86::EIP,
+                "eflags" => RegisterX86::EFLAGS,
+                _ => return None,
+            };
+            Some(id as i32)
+        }
+        Arch::Arm64 => {
+            let id = match name.as_str() {
+                "sp" => RegisterARM64::SP,
+                "pc" => RegisterARM64::PC,
+                "fp" | "x29" => RegisterARM64::X29,
+                "lr" | "x30" => RegisterARM64::X30,
+                _ => {
+                    let n = name.strip_prefix('x')?.parse::<u8>().ok()?;
+                    if n > 28 {
+                        return None;
+                    }
+                    return Some((RegisterARM64::X0 as i32) + n as i32);
+                }
+            };
+            Some(id as i32)
+        }
+        Arch::Arm => {
+            let id = match name.as_str() {
+                "sp" | "r13" => RegisterARM::SP,
+                "lr" | "r14" => RegisterARM::LR,
+                "pc" | "r15" => RegisterARM::PC,
+                "cpsr" => RegisterARM::CPSR,
+                _ => {
+                    let n = name.strip_prefix('r')?.parse::<u8>().ok()?;
+                    if n > 12 {
+                        return None;
+                    }
+                    return Some((RegisterARM::R0 as i32) + n as i32);
+                }
+            };
+            Some(id as i32)
+        }
+    }
+}
+
+/// The registers the caller asked for, in the order they asked, as hex.
+fn read_regs(
+    uc: &Uc<'_>,
+    arch: Arch,
+    wanted: &[String],
+) -> std::collections::BTreeMap<String, String> {
+    let mut out = std::collections::BTreeMap::new();
+    for name in wanted {
+        let shown = name.trim().trim_start_matches('%').to_ascii_lowercase();
+        if shown.is_empty() {
+            continue;
+        }
+        if let Some(id) = reg_id(arch, &shown) {
+            if let Ok(value) = uc.reg_read(id) {
+                out.insert(shown, format!("0x{value:x}"));
+            }
+        }
+    }
+    out
+}
+
+/// Read memory into a fresh buffer. `Unicorn::mem_read` fills a caller buffer,
+/// which is awkward when the result is what you wanted.
+fn read_mem(uc: &Uc<'_>, addr: u64, size: usize) -> Result<Vec<u8>, String> {
+    let mut buf = vec![0u8; size];
+    uc.mem_read(addr, &mut buf)
+        .map_err(|e| format!("{e:?}").to_lowercase())?;
+    Ok(buf)
+}
+
+/// Read the requested ranges back. A range that is not mapped is reported, not
+/// turned into a failure: the caller's guess is checked, not obeyed.
+fn read_out(uc: &Uc<'_>, wanted: &[ReadRange]) -> Vec<Readout> {
+    let mut out = Vec::with_capacity(wanted.len());
+    for range in wanted {
+        let size = range.size.min(1 << 20);
+        match read_mem(uc, range.addr, size) {
+            Ok(bytes) => out.push(Readout {
+                label: range.label.clone(),
+                addr: format!("0x{:x}", range.addr),
+                size,
+                hex: Some(bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()),
+                ascii: Some(
+                    bytes
+                        .iter()
+                        .map(|b| {
+                            if (0x20..0x7f).contains(b) {
+                                *b as char
+                            } else {
+                                '.'
+                            }
+                        })
+                        .collect(),
+                ),
+                error: None,
+            }),
+            Err(err) => out.push(Readout {
+                label: range.label.clone(),
+                addr: format!("0x{:x}", range.addr),
+                size,
+                hex: None,
+                ascii: None,
+                error: Some(format!("{err:?}").to_lowercase()),
+            }),
+        }
+    }
+    out
+}
+
+/// Disassemble the head of the trace, so "it stopped at 0x401123" can be read
+/// as instructions instead of numbers.
+fn disassemble(uc: &Uc<'_>, arch: Arch, trace: &[u64], shown: usize, thumb: bool) -> Vec<String> {
+    use capstone::prelude::*;
+
+    let built = match arch {
+        Arch::X86_64 => Capstone::new()
+            .x86()
+            .mode(arch::x86::ArchMode::Mode64)
+            .build(),
+        Arch::X86 => Capstone::new()
+            .x86()
+            .mode(arch::x86::ArchMode::Mode32)
+            .build(),
+        Arch::Arm64 => Capstone::new()
+            .arm64()
+            .mode(arch::arm64::ArchMode::Arm)
+            .build(),
+        // The same CPU runs both encodings, so which one the trace is in is a
+        // property of the target, not of the file.
+        Arch::Arm if thumb => Capstone::new()
+            .arm()
+            .mode(arch::arm::ArchMode::Thumb)
+            .build(),
+        Arch::Arm => Capstone::new().arm().mode(arch::arm::ArchMode::Arm).build(),
+    };
+    let Ok(cs) = built else {
+        // No capstone is not a reason to print nothing.
+        return trace
+            .iter()
+            .take(shown)
+            .map(|a| format!("0x{a:x}"))
+            .collect();
+    };
+
+    let mut out = Vec::new();
+    for &addr in trace.iter().take(shown) {
+        let Ok(code) = read_mem(uc, addr, 16) else {
+            out.push(format!("0x{addr:x}  <not mapped>"));
+            continue;
+        };
+        let decoded = cs.disasm_count(&code, addr, 1);
+        let line = decoded
+            .ok()
+            .and_then(|insns| insns.iter().next().map(|ins| line_for(ins, addr)));
+        out.push(line.unwrap_or_else(|| format!("0x{addr:x}  <undecodable>")));
+    }
+    out
+}
+
+fn line_for(ins: &capstone::Insn<'_>, addr: u64) -> String {
+    format!(
+        "0x{addr:x}  {} {}",
+        ins.mnemonic().unwrap_or("?"),
+        ins.op_str().unwrap_or("")
+    )
+    .trim_end()
+    .to_string()
+}
+
 fn describe_err(e: uc_error) -> String {
     match e {
         uc_error::READ_UNMAPPED => "read from unmapped memory".into(),
@@ -909,17 +1241,79 @@ fn on_stub(uc: &mut Uc<'_>, st: &Rc<RefCell<State>>, arch: Arch, addr: u64) {
         let _ = uc.emu_stop();
         return;
     }
-    let name = state.import_names.get(index).cloned().unwrap_or_default();
+    // A caller-supplied override names the import that should answer here,
+    // which is how a static binary (no import table to rewrite) gets told what
+    // an address does.
+    let override_here = state.overrides.get(&addr).cloned();
+    let name = match &override_here {
+        Some(over) => over.name.clone(),
+        None => state.import_names.get(index).cloned().unwrap_or_default(),
+    };
     // The prefix keeps JNI entries out of the import namespace; the report
     // reads better without it.
     let shown = name.strip_prefix("JNI:").unwrap_or(&name).to_string();
     state.count_call(&shown);
-    let value = imports::call(uc, &mut state, &name);
+    let mut value = imports::call(uc, &mut state, &name);
     if state.halted.is_some() {
         return;
     }
+    if let Some(over) = &override_here {
+        value = apply_override(&mut state, over, value);
+    }
     write_return(uc, arch, value);
     return_to_caller(uc, arch, &mut state);
+}
+
+/// Answer an instruction-by-instruction hook: record the trace and, outside the
+/// stub page, dispatch any address the caller overrode.
+fn on_any(uc: &mut Uc<'_>, st: &Rc<RefCell<State>>, arch: Arch, addr: u64) {
+    let mut state = st.borrow_mut();
+    if state.trace.len() < TRACE_KEEP {
+        state.trace.push(addr);
+    }
+    // `on_stub` owns the stub page; answering here too would call the import
+    // twice for one instruction.
+    if (STUB_BASE..STUB_BASE + STUB_SLOTS * STUB_STRIDE).contains(&addr) {
+        return;
+    }
+    let Some(over) = state.overrides.get(&addr).cloned() else {
+        return;
+    };
+
+    let shown = over
+        .name
+        .strip_prefix("JNI:")
+        .unwrap_or(&over.name)
+        .to_string();
+    state.count_call(&shown);
+    let value = imports::call(uc, &mut state, &over.name);
+    if state.halted.is_some() {
+        return;
+    }
+    let value = apply_override(&mut state, &over, value);
+    write_return(uc, arch, value);
+    return_to_caller(uc, arch, &mut state);
+}
+
+/// Hand back the caller's value when they gave one, unless the stub has to
+/// return something usable (a buffer, a file handle).
+fn apply_override(state: &mut State, over: &Override, value: u64) -> u64 {
+    match (over.ret, over.ret_applies()) {
+        (Some(ret), true) => {
+            state
+                .override_notes
+                .push(format!("{} -> {ret:#x} (forced)", over.name));
+            ret
+        }
+        (Some(_), false) => {
+            state.override_notes.push(format!(
+                "{} keeps its own {value:#x}: a forced value here would be an unusable pointer",
+                over.name
+            ));
+            value
+        }
+        (None, _) => value,
+    }
 }
 
 fn return_to_caller(uc: &mut Uc<'_>, arch: Arch, state: &mut State) {
@@ -1160,4 +1554,62 @@ pub fn syscall_args(uc: &Uc<'_>, arch: Arch) -> [u64; 6] {
         out[i] = uc.reg_read(*id).unwrap_or(0);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_forced_return_applies_to_functions_that_compute_a_value() {
+        assert!(Override {
+            name: "strlen".into(),
+            ret: Some(1)
+        }
+        .ret_applies());
+        assert!(Override {
+            name: "GetTickCount".into(),
+            ret: Some(1)
+        }
+        .ret_applies());
+    }
+
+    #[test]
+    fn a_forced_return_is_ignored_where_zero_would_be_a_null_pointer() {
+        for name in ["malloc", "calloc", "fopen", "strdup", "open", "openat"] {
+            assert!(
+                !Override {
+                    name: name.into(),
+                    ret: Some(0)
+                }
+                .ret_applies(),
+                "{name} must keep the pointer the stub handed back"
+            );
+        }
+    }
+
+    #[test]
+    fn register_names_follow_the_disassembly() {
+        assert_eq!(reg_id(Arch::X86_64, "rax"), Some(RegisterX86::RAX as i32));
+        assert_eq!(reg_id(Arch::X86_64, "%RIP"), Some(RegisterX86::RIP as i32));
+        assert_eq!(reg_id(Arch::X86_64, "r8"), Some(RegisterX86::R8 as i32));
+        assert_eq!(reg_id(Arch::X86_64, "r15"), Some(RegisterX86::R15 as i32));
+        assert_eq!(reg_id(Arch::X86, "eax"), Some(RegisterX86::EAX as i32));
+        assert_eq!(reg_id(Arch::Arm64, "x0"), Some(RegisterARM64::X0 as i32));
+        assert_eq!(
+            reg_id(Arch::Arm64, "x3"),
+            Some(RegisterARM64::X0 as i32 + 3)
+        );
+        assert_eq!(reg_id(Arch::Arm64, "lr"), Some(RegisterARM64::X30 as i32));
+        assert_eq!(reg_id(Arch::Arm, "r7"), Some(RegisterARM::R0 as i32 + 7));
+    }
+
+    #[test]
+    fn registers_that_do_not_exist_are_not_invented() {
+        assert_eq!(reg_id(Arch::X86_64, "r16"), None);
+        assert_eq!(reg_id(Arch::X86_64, "eax"), None);
+        assert_eq!(reg_id(Arch::Arm64, "x29plus"), None);
+        assert_eq!(reg_id(Arch::Arm, "r13"), Some(RegisterARM::SP as i32));
+        assert_eq!(reg_id(Arch::X86_64, ""), None);
+    }
 }

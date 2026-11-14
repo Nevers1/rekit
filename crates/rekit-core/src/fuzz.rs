@@ -45,6 +45,8 @@ pub struct Request {
     pub limit: usize,
     pub vfs: bool,
     pub thumb: bool,
+    /// Answer an address with an import call, `addr=name[:ret]`.
+    pub stubs: Vec<String>,
     /// Print the emulator's own JSON instead of a summary.
     pub json: bool,
 }
@@ -64,6 +66,7 @@ impl Default for Request {
             limit: DEFAULT_LIMIT,
             vfs: true,
             thumb: false,
+            stubs: Vec::new(),
             json: false,
         }
     }
@@ -206,6 +209,10 @@ fn probe(path: &str, req: &Request) -> Result<String> {
         engine: String::new(),
         sysroot: None,
         harness: None,
+        read_ranges: Vec::new(),
+        regs: Vec::new(),
+        trace: false,
+        stubs: req.stubs.clone(),
         json: true,
     };
     let raw = run_request(&inner)?;
@@ -314,6 +321,10 @@ fn sweep(path: &str, req: &Request, mode: &str) -> Result<String> {
     }
     if !req.vfs {
         args.push("--no-vfs".into());
+    }
+    for stub in &req.stubs {
+        args.push("--stub".into());
+        args.push(stub.clone());
     }
 
     // Every run is bounded, so the whole sweep is too: one budget per run plus

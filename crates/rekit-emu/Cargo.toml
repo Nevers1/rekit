@@ -20,6 +20,9 @@ serde.workspace = true
 serde_json.workspace = true
 goblin.workspace = true
 clap.workspace = true
+# BSD-3, so unlike Unicorn it could live anywhere; it is here only because the
+# trace is printed next to the emulation that produced it.
+capstone = "0.13"
 unicorn-engine = { version = "2", default-features = false, features = [
     "arch_x86",
     "arch_arm",

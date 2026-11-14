@@ -11,13 +11,14 @@ mod loader;
 mod syscalls;
 mod vfs;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 
-use emu::{Arg, Machine, Options};
+use emu::{Arg, Machine, Options, Override, ReadRange};
 
 #[derive(Parser)]
 #[command(
@@ -39,6 +40,8 @@ enum Command {
     List(ListArgs),
     /// Call one function once per value in a range.
     Sweep(SweepArgs),
+    /// Call every exported function once, with the same trial argument.
+    Probe(ProbeArgs),
 }
 
 #[derive(Parser)]
@@ -86,6 +89,22 @@ struct RunArgs {
     /// Do not answer file reads: only the binary's own memory exists.
     #[arg(long)]
     no_vfs: bool,
+
+    /// Registers to report after the run, e.g. `rax,rbx,rcx`.
+    #[arg(long, default_value = "")]
+    regs: String,
+
+    /// Read memory after the run: `addr:size:label`, repeatable.
+    #[arg(long = "read", value_name = "ADDR:SIZE:LABEL")]
+    read_ranges: Vec<String>,
+
+    /// Record executed instructions and print the first few.
+    #[arg(long)]
+    trace: bool,
+
+    /// Answer this address with an import call: `0x401040=strlen[:32]`, repeatable.
+    #[arg(long = "stub", value_name = "ADDR=NAME[:RET]")]
+    stubs: Vec<String>,
 }
 
 #[derive(Parser)]
@@ -146,6 +165,49 @@ struct SweepArgs {
     timeout_ms: u64,
 
     /// Treat the target as Thumb code (ARM only).
+    #[arg(long)]
+    thumb: bool,
+
+    /// Do not answer file reads: only the binary's own memory exists.
+    #[arg(long)]
+    no_vfs: bool,
+
+    /// Answer this address with an import call: `0x401040=strlen[:32]`, repeatable.
+    #[arg(long = "stub", value_name = "ADDR=NAME[:RET]")]
+    stubs: Vec<String>,
+}
+
+/// One call per exported function, in one process.
+///
+/// This is the answer to "where is the interesting function": it does not claim
+/// what any of them do, only which ones return something, which ones fall over
+/// on a trial argument and which ones never come back.
+#[derive(Parser)]
+struct ProbeArgs {
+    /// Binary to load.
+    path: PathBuf,
+
+    /// Trial argument, same syntax as `run --args`.
+    #[arg(long, default_value = "1", allow_hyphen_values = true)]
+    arg: String,
+
+    /// How many functions to call, in address order.
+    #[arg(long, default_value_t = 120)]
+    limit: usize,
+
+    /// Print one JSON object instead of the human table.
+    #[arg(long)]
+    json: bool,
+
+    /// Stop after this many instructions per function (0 means no limit).
+    #[arg(long, default_value_t = 20_000)]
+    max_insns: u64,
+
+    /// Wall clock limit per function in milliseconds.
+    #[arg(long, default_value_t = 500)]
+    timeout_ms: u64,
+
+    /// Treat the targets as Thumb code (ARM only).
     #[arg(long)]
     thumb: bool,
 
@@ -218,6 +280,75 @@ fn parse_args(text: &str) -> Result<Vec<Arg>> {
     Ok(out)
 }
 
+/// `addr:size:label,addr:size` — the label is optional and defaults to the
+/// address, because most reads exist to answer "what is at 0x… now".
+fn parse_reads(specs: &[String]) -> Result<Vec<ReadRange>> {
+    let mut out = Vec::new();
+    for item in specs.iter().flat_map(|s| split_args(s)) {
+        let mut parts = item.splitn(3, ':');
+        let addr_text = parts.next().unwrap_or_default();
+        let addr = parse_address(addr_text)
+            .map_err(|err| anyhow::anyhow!("bad read address {addr_text:?}: {err}"))?;
+        let size_text = parts.next().unwrap_or("64");
+        let size: usize = size_text
+            .trim()
+            .parse()
+            .with_context(|| format!("bad read size {size_text:?} in {item:?}"))?;
+        if size == 0 {
+            bail!("read of 0 bytes at {addr_text}: ask for at least one");
+        }
+        let label = parts
+            .next()
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("0x{addr:x}"));
+        out.push(ReadRange { addr, size, label });
+    }
+    // An empty `--read ""` should mean "none", not one unparseable entry.
+    out.retain(|r| r.size > 0);
+    Ok(out)
+}
+
+fn parse_regs(spec: &str) -> Vec<String> {
+    spec.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// `0x401040=strlen:32` — the address is answered as if it were a call to that
+/// import, and 32 is the value it returns instead of the stub's own answer.
+fn parse_stubs(specs: &[String]) -> Result<HashMap<u64, Override>> {
+    let mut out = HashMap::new();
+    for item in specs.iter().flat_map(|s| split_args(s)) {
+        let Some((addr_text, rest)) = item.split_once('=') else {
+            bail!("stub {item:?} is not addr=name: give `0x401040=strlen[:32]`");
+        };
+        let addr = parse_address(addr_text.trim())
+            .map_err(|err| anyhow::anyhow!("bad stub address {addr_text:?}: {err}"))?;
+        let (name, ret) = match rest.rsplit_once(':') {
+            Some((name, ret)) => {
+                let ret = parse_address(ret.trim()).map_err(|err| {
+                    anyhow::anyhow!("bad forced return {ret:?} in stub {item:?}: {err}")
+                })?;
+                (name.trim(), Some(ret))
+            }
+            None => (rest.trim(), None),
+        };
+        if name.is_empty() {
+            bail!("stub {item:?} has no import name");
+        }
+        out.insert(
+            addr,
+            Override {
+                name: name.to_string(),
+                ret,
+            },
+        );
+    }
+    Ok(out)
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match run(cli) {
@@ -234,6 +365,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Command::List(args) => list(args),
         Command::Run(args) => run_one(args),
         Command::Sweep(args) => sweep(args),
+        Command::Probe(args) => probe(args),
     }
 }
 
@@ -294,9 +426,13 @@ fn run_one(args: RunArgs) -> Result<ExitCode> {
         vfs: !args.no_vfs,
         as_double: args.as_double,
         thumb: args.thumb,
+        trace: args.trace,
+        regs: parse_regs(&args.regs),
+        read_ranges: parse_reads(&args.read_ranges)?,
+        overrides: parse_stubs(&args.stubs)?,
     };
 
-    let mut machine = Machine::new(loaded, opts.vfs)?;
+    let mut machine = Machine::new(loaded, &opts)?;
     let report = machine.run(target, symbol.as_deref(), &cargs, &opts)?;
 
     if args.json {
@@ -331,6 +467,27 @@ fn run_one(args: RunArgs) -> Result<ExitCode> {
         }
         if !report.output.is_empty() {
             println!("output    {}", report.output.trim_end());
+        }
+        for (name, value) in &report.regs {
+            println!("reg       {name} {value}");
+        }
+        for read in &report.reads {
+            match (&read.hex, &read.error) {
+                (Some(hex), _) => {
+                    println!("read      {} {} {}", read.label, read.addr, hex);
+                    if let Some(ascii) = &read.ascii {
+                        println!("            |{ascii}|");
+                    }
+                }
+                (None, Some(error)) => println!("read      {} {} {error}", read.label, read.addr),
+                _ => {}
+            }
+        }
+        for line in &report.disasm {
+            println!("trace     {line}");
+        }
+        for line in &report.overrides {
+            println!("stub      {line}");
         }
         for note in &report.notes {
             println!("note      {note}");
@@ -403,21 +560,28 @@ fn sweep(args: SweepArgs) -> Result<ExitCode> {
     let (target, symbol) = resolve_target(&parsed, args.symbol.as_deref(), args.address, false)?;
     drop(parsed);
 
-    let opts = |vfs: bool| Options {
-        max_insns: args.max_insns,
-        timeout_ms: args.timeout_ms,
-        vfs,
-        as_double: false,
-        thumb: args.thumb,
-    };
     let vfs = !args.no_vfs;
+    let stubs = parse_stubs(&args.stubs)?;
 
     let mut results: Vec<(i64, emu::Report)> = Vec::new();
     let mut value = args.from;
     while value <= args.to && results.len() < args.limit {
         let loaded = loader::load(&bytes)?;
-        let opts = opts(vfs);
-        let mut machine = Machine::new(loaded, opts.vfs)?;
+        // A sweep has no trace and no register dump: the answer is one line per
+        // input, and paying for the code hook on every instruction would make
+        // every run slower for information nobody reads.
+        let opts = Options {
+            max_insns: args.max_insns,
+            timeout_ms: args.timeout_ms,
+            vfs,
+            as_double: false,
+            thumb: args.thumb,
+            trace: false,
+            regs: Vec::new(),
+            read_ranges: Vec::new(),
+            overrides: stubs.clone(),
+        };
+        let mut machine = Machine::new(loaded, &opts)?;
         let report = machine.run(target, symbol.as_deref(), &[Arg::Num(value as u64)], &opts)?;
         results.push((value, report));
         match value.checked_add(args.step) {
@@ -482,6 +646,118 @@ fn sweep(args: SweepArgs) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
+struct ProbeRow {
+    name: String,
+    address: u64,
+    report: Option<emu::Report>,
+    error: Option<String>,
+}
+
+fn probe(args: ProbeArgs) -> Result<ExitCode> {
+    if args.limit == 0 {
+        bail!("--limit must be at least 1");
+    }
+    let bytes = read_binary(&args.path)?;
+    let parsed =
+        loader::load(&bytes).with_context(|| format!("cannot parse {}", args.path.display()))?;
+
+    // Address order is stable and groups neighbours (a class's methods land
+    // next to each other), which is what makes the output readable.
+    let mut targets: Vec<(String, u64)> = parsed.symbols.clone();
+    targets.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+    targets.truncate(args.limit);
+    let arch = parsed.arch.name();
+    let platform = parsed.platform.name();
+    drop(parsed);
+
+    if targets.is_empty() {
+        bail!("no exported functions: a stripped binary gives probe nothing to call");
+    }
+
+    let cargs = parse_args(&args.arg)?;
+    let mut rows: Vec<ProbeRow> = Vec::new();
+    for (name, address) in &targets {
+        let mut row = ProbeRow {
+            name: name.clone(),
+            address: *address,
+            report: None,
+            error: None,
+        };
+        match loader::load(&bytes).and_then(|loaded| {
+            let opts = Options {
+                max_insns: args.max_insns,
+                timeout_ms: args.timeout_ms,
+                vfs: !args.no_vfs,
+                as_double: false,
+                thumb: args.thumb,
+                trace: false,
+                regs: Vec::new(),
+                read_ranges: Vec::new(),
+                overrides: HashMap::new(),
+            };
+            let mut machine = Machine::new(loaded, &opts)?;
+            machine.run(*address, Some(name), &cargs, &opts)
+        }) {
+            Ok(report) => row.report = Some(report),
+            // One function the emulator cannot even start must not lose the
+            // other 119 answers.
+            Err(err) => row.error = Some(format!("{err:#}")),
+        }
+        rows.push(row);
+    }
+
+    if args.json {
+        let json_rows: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|row| {
+                let address = format!("0x{:x}", row.address);
+                match &row.report {
+                    Some(report) => serde_json::json!({
+                        "name": row.name,
+                        "address": address,
+                        "ok": report.ok,
+                        "stop": report.stop,
+                        "return": report.ret,
+                        "fault": report.fault,
+                        "unimplemented": report.unimplemented,
+                    }),
+                    None => serde_json::json!({
+                        "name": row.name,
+                        "address": address,
+                        "ok": false,
+                        "error": row.error,
+                    }),
+                }
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "arch": arch,
+                "platform": platform,
+                "arg": args.arg,
+                "runs": json_rows,
+            }))?
+        );
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    for row in &rows {
+        let verdict = match (&row.report, &row.error) {
+            (_, Some(error)) => format!("could not start: {error}"),
+            (Some(report), _) => match (&report.fault, report.ok) {
+                (Some(fault), _) => format!("fault {} at {:#x}", fault.access, fault.address),
+                (None, false) => report.stop.clone(),
+                (None, true) => format!("return {} ({})", report.ret.hex, report.ret.i64),
+            },
+            (None, None) => "no report".to_string(),
+        };
+        println!("{:>12}  {:<40} {verdict}", row.address, row.name);
+    }
+    eprintln!("{} functions probed", rows.len());
+    Ok(ExitCode::SUCCESS)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -531,5 +807,42 @@ mod tests {
         assert_eq!(parse_address("0x4010").unwrap(), 0x4010);
         assert_eq!(parse_address("4192").unwrap(), 4192);
         assert!(parse_address("0xzz").is_err());
+    }
+
+    #[test]
+    fn a_read_needs_an_address_a_size_and_gets_a_label() {
+        let reads = parse_reads(&["0x20001000:16:buf".into(), "0x20:8".into()]).unwrap();
+        assert_eq!(reads.len(), 2);
+        assert_eq!(reads[0].addr, 0x20001000);
+        assert_eq!(reads[0].size, 16);
+        assert_eq!(reads[0].label, "buf");
+        // No label: the address is the label, because that is what was asked.
+        assert_eq!(reads[1].label, "0x20");
+    }
+
+    #[test]
+    fn a_zero_length_read_is_refused() {
+        assert!(parse_reads(&["0x2000:0".into()]).is_err());
+    }
+
+    #[test]
+    fn registers_are_split_and_trimmed() {
+        assert_eq!(parse_regs(" rax, rdi ,"), vec!["rax", "rdi"]);
+        assert!(parse_regs("").is_empty());
+    }
+
+    #[test]
+    fn a_stub_may_name_the_value_to_return() {
+        let stubs = parse_stubs(&["0x401040=strlen".into(), "0x401050=strlen:32".into()]).unwrap();
+        assert_eq!(stubs.len(), 2);
+        assert_eq!(stubs[&0x401040].name, "strlen");
+        assert_eq!(stubs[&0x401040].ret, None);
+        assert_eq!(stubs[&0x401050].ret, Some(32));
+    }
+
+    #[test]
+    fn a_stub_without_a_name_is_refused() {
+        assert!(parse_stubs(&["0x401040".into()]).is_err());
+        assert!(parse_stubs(&["0x401040=:1".into()]).is_err());
     }
 }

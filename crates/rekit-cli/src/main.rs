@@ -102,8 +102,22 @@ enum Command {
         path: String,
         #[arg(long, default_value = "all")]
         kind: String,
+        /// kind=const: the constant to find.
+        #[arg(long)]
+        value: Option<String>,
+        /// kind=const: how many bytes the constant occupies.
+        #[arg(long, default_value_t = 4)]
+        width: usize,
+        /// kind=apis: only this group.
+        #[arg(long)]
+        category: Option<String>,
+        /// kind=probe: trial argument.
+        #[arg(long, default_value = "1")]
+        arg: String,
         #[arg(long, default_value_t = 50)]
         limit: usize,
+        #[arg(long)]
+        json: bool,
     },
     /// List archive members.
     Archive { path: String },
@@ -311,6 +325,18 @@ enum Command {
         /// qemu: a prebuilt harness instead of the cached one.
         #[arg(long)]
         harness: Option<String>,
+        /// Registers to report after the run, e.g. rax,rdi.
+        #[arg(long, default_value = "")]
+        regs: String,
+        /// Read memory after the run: addr:size:label, repeatable.
+        #[arg(long = "read", value_name = "ADDR:SIZE:LABEL")]
+        read_ranges: Vec<String>,
+        /// Record executed instructions and show the head of the trace.
+        #[arg(long)]
+        trace: bool,
+        /// Answer an address with an import call: addr=name[:ret], repeatable.
+        #[arg(long = "stub", value_name = "ADDR=NAME[:RET]")]
+        stubs: Vec<String>,
         #[arg(long)]
         json: bool,
     },
@@ -378,6 +404,9 @@ enum Command {
         /// Target is Thumb code (ARM only).
         #[arg(long)]
         thumb: bool,
+        /// Answer an address with an import call: addr=name[:ret], repeatable.
+        #[arg(long = "stub", value_name = "ADDR=NAME[:RET]")]
+        stubs: Vec<String>,
         /// Print the emulator's raw JSON.
         #[arg(long)]
         json: bool,
@@ -573,9 +602,28 @@ fn main() -> Result<()> {
         Command::Antidebug {
             path, json: true, ..
         } => serde_json::to_string_pretty(&rekit_core::antidebug::scan(&path)?)?,
-        Command::Scan { path, kind, limit } => {
-            render("scan", json!({"path": path, "kind": kind, "limit": limit}))?
-        }
+        Command::Scan {
+            path,
+            kind,
+            value,
+            width,
+            category,
+            arg,
+            limit,
+            json,
+        } => render(
+            "scan",
+            json!({
+                "path": path,
+                "kind": kind,
+                "value": value,
+                "width": width,
+                "category": category,
+                "arg": arg,
+                "limit": limit,
+                "json": json,
+            }),
+        )?,
         Command::Archive { path } => render("archive", json!({"path": path}))?,
         Command::Disasm {
             path,
@@ -758,6 +806,10 @@ fn main() -> Result<()> {
             engine,
             sysroot,
             harness,
+            regs,
+            read_ranges,
+            trace,
+            stubs,
             json,
         } => render(
             "emulate",
@@ -775,6 +827,10 @@ fn main() -> Result<()> {
                 "engine": engine,
                 "sysroot": sysroot,
                 "harness": harness,
+                "regs": regs,
+                "read_ranges": read_ranges,
+                "trace": trace,
+                "stubs": stubs,
                 "json": json,
             }),
         )?,
@@ -815,6 +871,7 @@ fn main() -> Result<()> {
             limit,
             no_vfs,
             thumb,
+            stubs,
             json,
         } => render(
             "fuzz",
@@ -831,6 +888,7 @@ fn main() -> Result<()> {
                 "limit": limit,
                 "vfs": !no_vfs,
                 "thumb": thumb,
+                "stubs": stubs,
                 "json": json,
             }),
         )?,
